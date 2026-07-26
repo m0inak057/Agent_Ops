@@ -4,24 +4,74 @@ Exposes endpoints to start a new audit against a repository, list
 existing audit jobs, and fetch the status/result of a specific job.
 """
 
-from fastapi import APIRouter
+import uuid
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.db import get_db
+from backend.models import AuditJob, AuditJobStatus
+from backend.schemas import (
+    AuditJobCreate,
+    AuditJobCreateResponse,
+    AuditJobResponse,
+    extract_repo_name,
+)
+from backend.services.dispatcher import dispatch_audit
 
 router = APIRouter(prefix="/audits", tags=["audits"])
 
 
-@router.post("/")
-async def create_audit():
-    """Create and dispatch a new audit job for a repository."""
-    pass
+@router.post("", response_model=AuditJobCreateResponse, status_code=status.HTTP_201_CREATED)
+async def create_audit(
+    payload: AuditJobCreate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> AuditJobCreateResponse:
+    """Create a new audit job for a repository and dispatch it for analysis."""
+    try:
+        repo_name = extract_repo_name(payload.repo_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    audit_job = AuditJob(
+        repo_url=payload.repo_url,
+        repo_name=repo_name,
+        status=AuditJobStatus.PENDING,
+    )
+    db.add(audit_job)
+    await db.commit()
+    await db.refresh(audit_job)
+
+    background_tasks.add_task(dispatch_audit, audit_job.id)
+
+    return AuditJobCreateResponse(
+        audit_id=audit_job.id,
+        status=audit_job.status,
+        repo_url=audit_job.repo_url,
+        repo_name=audit_job.repo_name,
+    )
 
 
-@router.get("/")
-async def list_audits():
-    """List all audit jobs."""
-    pass
+@router.get("/{audit_id}", response_model=AuditJobResponse)
+async def get_audit(audit_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> AuditJob:
+    """Retrieve a single audit job's full details by ID."""
+    audit_job = await db.get(AuditJob, audit_id)
+    if audit_job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit job not found")
+    return audit_job
 
 
-@router.get("/{audit_id}")
-async def get_audit(audit_id: str):
-    """Retrieve a single audit job by ID."""
-    pass
+@router.get("", response_model=list[AuditJobResponse])
+async def list_audits(
+    status_filter: AuditJobStatus | None = Query(default=None, alias="status"),
+    db: AsyncSession = Depends(get_db),
+) -> list[AuditJob]:
+    """List all audit jobs, most recently created first, optionally filtered by status."""
+    stmt = select(AuditJob).order_by(AuditJob.created_at.desc())
+    if status_filter is not None:
+        stmt = stmt.where(AuditJob.status == status_filter)
+
+    result = await db.execute(stmt)
+    return list(result.scalars().all())

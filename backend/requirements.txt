@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+alembic
+asyncpg
+psycopg2-binary
+redis
+pydantic
+pydantic-settings
+python-dotenv
+pyautogen
+mcp
+openai
+anthropic
+langfuse
+opentelemetry-sdk

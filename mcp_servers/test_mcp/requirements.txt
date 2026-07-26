@@ -1,0 +1,9 @@
+mcp
+fastapi
+uvicorn
+pytest
+pytest-cov
+coverage
+ruff
+bandit
+semgrep

@@ -1,0 +1,5 @@
+{
+  "version": "0.1.0",
+  "description": "Benchmark dataset of labeled repositories and expected findings used to evaluate AgentOps audit quality.",
+  "cases": []
+}

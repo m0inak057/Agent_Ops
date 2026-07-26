@@ -1,0 +1,13 @@
+# Dockerfile for the filesystem_mcp server.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY mcp_servers/filesystem_mcp/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY mcp_servers/filesystem_mcp/ ./
+
+EXPOSE 8002
+
+CMD ["python", "server.py"]

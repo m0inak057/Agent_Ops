@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import os
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -300,18 +301,36 @@ def run_health_server():
     server.serve_forever()
 
 
+MCP_EPHEMERAL = os.environ.get("MCP_EPHEMERAL", "false").lower() == "true"
+
+
 async def main():
-    # When run as a detached container (no client attached to stdin), stdin
-    # hits EOF immediately and a single stdio_server session would return
-    # right away, exiting the process. Loop so the container stays alive
-    # and healthy, and picks up a real session whenever a client attaches.
-    while True:
+    if MCP_EPHEMERAL:
+        # Ephemeral mode: spawned per-call by an agent client. Exit cleanly
+        # on EOF so the client's subprocess cleanup (which waits for this
+        # process to exit) doesn't hang forever.
         try:
             async with stdio_server() as (read_stream, write_stream):
-                await app.run(read_stream, write_stream, app.create_initialization_options())
-        except Exception:
-            logging.exception("MCP stdio session ended unexpectedly")
-        await asyncio.sleep(1)
+                await app.run(
+                    read_stream, write_stream, app.create_initialization_options()
+                )
+        except Exception as e:
+            sys.stderr.write(f"MCP session ended: {e}\n")
+            sys.stderr.flush()
+    else:
+        # Container mode: no client attached to stdin, so a single session
+        # would hit EOF immediately and exit. Loop so the container stays
+        # alive and healthy, picking up a real session whenever one attaches.
+        while True:
+            try:
+                async with stdio_server() as (read_stream, write_stream):
+                    await app.run(
+                        read_stream, write_stream, app.create_initialization_options()
+                    )
+            except Exception as e:
+                sys.stderr.write(f"MCP session ended, restarting: {e}\n")
+                sys.stderr.flush()
+                await asyncio.sleep(1)
 
 
 if __name__ == "__main__":

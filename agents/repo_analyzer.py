@@ -11,6 +11,7 @@ from agents.tools.github_client import (
     get_file_content,
     get_repository,
     get_repository_tree,
+    github_mcp_session,
 )
 
 DEPENDENCY_CANDIDATES = ["requirements.txt", "package.json"]
@@ -44,9 +45,9 @@ def _extract_repo_name(repo_url: str) -> str:
     return repo_url.strip("/")
 
 
-async def _read_if_exists(repo_name: str, path: str) -> str | None:
+async def _read_if_exists(repo_name: str, path: str, session) -> str | None:
     try:
-        return await get_file_content(repo_name, path)
+        return await get_file_content(repo_name, path, session)
     except Exception:
         return None
 
@@ -79,50 +80,54 @@ async def analyze_repository(repo_url: str) -> dict:
     """Analyze a GitHub repository and return a structured map."""
     repo_name = _extract_repo_name(repo_url)
 
-    await get_repository(repo_name)
-    tree = await get_repository_tree(repo_name)
+    async with github_mcp_session() as session:
+        await get_repository(repo_name, session)
+        tree = await get_repository_tree(repo_name, session)
 
-    file_tree = [item["path"] for item in tree if item["type"] == "blob"]
+        file_tree = [item["path"] for item in tree if item["type"] == "blob"]
 
-    languages: set[str] = set()
-    for path in file_tree:
-        for ext, lang in LANGUAGE_EXTENSIONS.items():
-            if path.endswith(ext):
-                languages.add(lang)
-                break
+        languages: set[str] = set()
+        for path in file_tree:
+            for ext, lang in LANGUAGE_EXTENSIONS.items():
+                if path.endswith(ext):
+                    languages.add(lang)
+                    break
 
-    has_dockerfile = any(path in file_tree for path in DOCKERFILE_CANDIDATES)
-    has_docker_compose = any(path in file_tree for path in COMPOSE_CANDIDATES)
-    has_readme = any(path in file_tree for path in README_CANDIDATES)
-    has_tests = any(
-        "/tests/" in f"/{path}" or "/test/" in f"/{path}" for path in file_tree
-    )
+        has_dockerfile = any(path in file_tree for path in DOCKERFILE_CANDIDATES)
+        has_docker_compose = any(path in file_tree for path in COMPOSE_CANDIDATES)
+        has_readme = any(path in file_tree for path in README_CANDIDATES)
+        has_tests = any(
+            "/tests/" in f"/{path}" or "/test/" in f"/{path}" for path in file_tree
+        )
 
-    workflow_files = sorted(
-        path
-        for path in file_tree
-        if path.startswith(".github/workflows/") and (path.endswith(".yml") or path.endswith(".yaml"))
-    )
-    has_ci_cd = bool(workflow_files)
+        workflow_files = sorted(
+            path
+            for path in file_tree
+            if path.startswith(".github/workflows/")
+            and (path.endswith(".yml") or path.endswith(".yaml"))
+        )
+        has_ci_cd = bool(workflow_files)
 
-    dependency_file_content = None
-    for candidate in DEPENDENCY_CANDIDATES:
-        if candidate in file_tree:
-            dependency_file_content = await _read_if_exists(repo_name, candidate)
-            if dependency_file_content is not None:
-                break
+        dependency_file_content = None
+        for candidate in DEPENDENCY_CANDIDATES:
+            if candidate in file_tree:
+                dependency_file_content = await _read_if_exists(
+                    repo_name, candidate, session
+                )
+                if dependency_file_content is not None:
+                    break
 
-    dockerfile_content = None
-    if has_dockerfile:
-        dockerfile_content = await _read_if_exists(repo_name, "Dockerfile")
+        dockerfile_content = None
+        if has_dockerfile:
+            dockerfile_content = await _read_if_exists(repo_name, "Dockerfile", session)
 
-    readme_content = None
-    if has_readme:
-        readme_content = await _read_if_exists(repo_name, "README.md")
+        readme_content = None
+        if has_readme:
+            readme_content = await _read_if_exists(repo_name, "README.md", session)
 
-    ci_cd_content = None
-    if workflow_files:
-        ci_cd_content = await _read_if_exists(repo_name, workflow_files[0])
+        ci_cd_content = None
+        if workflow_files:
+            ci_cd_content = await _read_if_exists(repo_name, workflow_files[0], session)
 
     project_type = _detect_project_type(dependency_file_content, sorted(languages))
 

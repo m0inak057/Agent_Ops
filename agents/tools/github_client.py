@@ -1,88 +1,96 @@
-"""Direct GitHub REST API client used by agents to read repository content.
+"""MCP client wrapper for connecting agents to the github_mcp server.
 
-Uses httpx for async HTTP calls against the GitHub REST API. This is a
-stopgap until the github_mcp server is wired in (V2) — agents call these
-functions directly instead of going through MCP.
+Spawns the github_mcp server over stdio and calls its tools (repository
+metadata/tree/file reads, code search, branch/commit/PR creation) as
+agent-callable functions. Callers that make several calls in a row
+(e.g. repo_analyzer) should open one session via github_mcp_session()
+and pass it through, rather than spawning a fresh subprocess per call.
 """
 
-import base64
+import json
 import os
+from contextlib import asynccontextmanager
 
-import httpx
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
-GITHUB_API_BASE = "https://api.github.com"
-
-
-def _headers() -> dict:
-    token = os.environ.get("GITHUB_TOKEN")
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
+GITHUB_MCP_SERVER_PATH = "/app/mcp_servers/github_mcp/server.py"
 
 
-async def get_repository(repo_name: str) -> dict:
-    """GET /repos/{repo_name} — returns repo metadata."""
-    url = f"{GITHUB_API_BASE}/repos/{repo_name}"
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        response = await client.get(url, headers=_headers())
-    if response.status_code != 200:
-        raise Exception(
-            f"GitHub API error fetching repository {repo_name}: "
-            f"{response.status_code} {response.text}"
-        )
-    return response.json()
+@asynccontextmanager
+async def github_mcp_session():
+    """Open a single MCP session against the github_mcp server."""
+    server_params = StdioServerParameters(
+        command="python",
+        args=[GITHUB_MCP_SERVER_PATH],
+        env={
+            **os.environ,
+            "GITHUB_TOKEN": os.environ.get("GITHUB_TOKEN", ""),
+            "MCP_EPHEMERAL": "true",
+        },
+    )
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            yield session
 
 
-async def get_repository_tree(repo_name: str) -> list[dict]:
-    """GET /repos/{repo_name}/git/trees/HEAD?recursive=1
-
-    Returns list of {path, type} for all files.
-    """
-    url = f"{GITHUB_API_BASE}/repos/{repo_name}/git/trees/HEAD"
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        response = await client.get(url, headers=_headers(), params={"recursive": "1"})
-    if response.status_code != 200:
-        raise Exception(
-            f"GitHub API error fetching tree for {repo_name}: "
-            f"{response.status_code} {response.text}"
-        )
-    data = response.json()
-    return [{"path": item["path"], "type": item["type"]} for item in data.get("tree", [])]
+async def call_github_tool(tool_name: str, arguments: dict, session=None) -> str:
+    """Call a tool on the github_mcp server, reusing a session if given."""
+    if session is not None:
+        result = await session.call_tool(tool_name, arguments)
+        return result.content[0].text
+    async with github_mcp_session() as s:
+        result = await s.call_tool(tool_name, arguments)
+        return result.content[0].text
 
 
-async def get_file_content(repo_name: str, file_path: str) -> str:
-    """GET /repos/{repo_name}/contents/{file_path}
-
-    Returns decoded file content as string (base64 decode the response).
-    """
-    url = f"{GITHUB_API_BASE}/repos/{repo_name}/contents/{file_path}"
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        response = await client.get(url, headers=_headers())
-    if response.status_code != 200:
-        raise Exception(
-            f"GitHub API error fetching file {file_path} in {repo_name}: "
-            f"{response.status_code} {response.text}"
-        )
-    data = response.json()
-    if data.get("encoding") != "base64" or "content" not in data:
-        raise Exception(f"Unexpected content response for {file_path} in {repo_name}")
-    return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+async def get_repository(repo_name: str, session=None) -> dict:
+    """Get metadata for a GitHub repository via the github_mcp server."""
+    result = await call_github_tool("get_repository", {"repo_name": repo_name}, session)
+    return json.loads(result)
 
 
-async def search_code(repo_name: str, query: str) -> list[dict]:
-    """GET /search/code?q={query}+repo:{repo_name}
+async def get_repository_tree(repo_name: str, session=None) -> list:
+    """Get the full recursive file tree of a GitHub repository."""
+    result = await call_github_tool(
+        "get_repository_tree", {"repo_name": repo_name}, session
+    )
+    return json.loads(result)
 
-    Returns list of {path, url} matches.
-    """
-    url = f"{GITHUB_API_BASE}/search/code"
-    params = {"q": f"{query} repo:{repo_name}"}
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        response = await client.get(url, headers=_headers(), params=params)
-    if response.status_code != 200:
-        raise Exception(
-            f"GitHub API error searching code in {repo_name}: "
-            f"{response.status_code} {response.text}"
-        )
-    data = response.json()
-    return [{"path": item["path"], "url": item["url"]} for item in data.get("items", [])]
+
+async def get_file_content(repo_name: str, file_path: str, session=None) -> str:
+    """Get the decoded contents of a file in a GitHub repository."""
+    return await call_github_tool(
+        "read_file", {"repo_name": repo_name, "file_path": file_path}, session
+    )
+
+
+async def search_code(repo_name: str, query: str, session=None) -> list:
+    """Search for code matching a query within a GitHub repository."""
+    result = await call_github_tool(
+        "search_code", {"repo_name": repo_name, "query": query}, session
+    )
+    return json.loads(result)
+
+
+async def create_pull_request(
+    repo_name: str,
+    title: str,
+    body: str,
+    head_branch: str,
+    base_branch: str,
+    session=None,
+) -> str:
+    """Create a pull request in a GitHub repository."""
+    return await call_github_tool(
+        "create_pull_request",
+        {
+            "repo_name": repo_name,
+            "title": title,
+            "body": body,
+            "head_branch": head_branch,
+            "base_branch": base_branch,
+        },
+        session,
+    )

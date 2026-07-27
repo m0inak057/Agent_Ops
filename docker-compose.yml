@@ -64,13 +64,13 @@ services:
       dockerfile: infrastructure/Dockerfile.github_mcp
     container_name: agentops_github_mcp
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
     ports:
       - "8001:8001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
       retries: 5
 
@@ -80,13 +80,15 @@ services:
       dockerfile: infrastructure/Dockerfile.filesystem_mcp
     container_name: agentops_filesystem_mcp
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      - FILESYSTEM_SANDBOX_PATH=/sandbox
+    volumes:
+      - sandbox_data:/sandbox
     ports:
       - "8002:8002"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
       retries: 5
 
@@ -96,13 +98,11 @@ services:
       dockerfile: infrastructure/Dockerfile.test_mcp
     container_name: agentops_test_mcp
     restart: unless-stopped
-    env_file:
-      - .env
     ports:
       - "8003:8003"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
       retries: 5
 
@@ -112,15 +112,14 @@ services:
       dockerfile: infrastructure/Dockerfile.devops_mcp
     container_name: agentops_devops_mcp
     restart: unless-stopped
-    env_file:
-      - .env
     ports:
       - "8004:8004"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
       retries: 5
 
 volumes:
   postgres_data:
+  sandbox_data:

@@ -43,6 +43,7 @@ services:
       - OPENAI_BASE_URL=${OPENAI_BASE_URL}
       - AUTOGEN_MODEL=${AUTOGEN_MODEL}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
     ports:
       - "8000:8000"
     depends_on:

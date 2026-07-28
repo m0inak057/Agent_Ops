@@ -10,6 +10,8 @@ import logging
 import uuid
 from datetime import datetime
 
+from sqlalchemy import select
+
 from backend.db import SessionLocal
 from backend.models import AgentRun, AgentRunStatus, AuditJob, AuditJobStatus, Finding
 
@@ -22,6 +24,7 @@ from agents.performance import run_performance_audit
 from agents.repo_analyzer import analyze_repository
 from agents.security import run_security_audit
 from agents.testing import run_testing_audit
+from backend.services.notifier import notify_new_findings
 from backend.services.prompt_optimizer import check_and_improve_prompts
 from evaluation.confidence_pipeline import validate_findings
 from evaluation.framework import run_evaluation
@@ -124,6 +127,15 @@ async def dispatch_audit(audit_id: uuid.UUID) -> None:
             await session.commit()
 
             logger.info("Audit job %s complete", audit_id)
+
+            try:
+                findings_result = await session.execute(
+                    select(Finding).where(Finding.audit_id == audit_id)
+                )
+                written_findings = findings_result.scalars().all()
+                await notify_new_findings(audit_job, written_findings, session)
+            except Exception as e:
+                logger.warning("Notifier failed: %s", e)
 
             try:
                 await run_evaluation(str(audit_id), repo_map, session)

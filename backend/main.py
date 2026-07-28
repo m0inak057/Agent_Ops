@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from backend.api import audits, evaluations, findings, fixes
+from backend.api.webhooks import router as webhooks_router
 from backend.db import SessionLocal, init_db
 
 logging.basicConfig(
@@ -47,6 +48,7 @@ app.include_router(audits.router, prefix="/api")
 app.include_router(findings.router, prefix="/api")
 app.include_router(evaluations.router, prefix="/api")
 app.include_router(fixes.router, prefix="/api")
+app.include_router(webhooks_router)
 
 
 @app.get("/health")

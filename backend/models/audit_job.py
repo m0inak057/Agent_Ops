@@ -7,12 +7,18 @@ target repository metadata, and the agent runs it spawns.
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.db import Base
+
+if TYPE_CHECKING:
+    from backend.models.agent_run import AgentRun
+    from backend.models.evaluation import Evaluation
+    from backend.models.finding import Finding
 
 
 class AuditJobStatus(str, enum.Enum):
@@ -56,4 +62,6 @@ class AuditJob(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<AuditJob id={self.id} repo_name={self.repo_name!r} status={self.status}>"
+        return (
+            f"<AuditJob id={self.id} repo_name={self.repo_name!r} status={self.status}>"
+        )

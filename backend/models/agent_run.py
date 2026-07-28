@@ -7,12 +7,17 @@ and findings it produced.
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.db import Base
+
+if TYPE_CHECKING:
+    from backend.models.audit_job import AuditJob
+    from backend.models.tool_execution import ToolExecution
 
 
 class AgentRunStatus(str, enum.Enum):
@@ -50,7 +55,9 @@ class AgentRun(Base):
     )
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    audit_job: Mapped["AuditJob"] = relationship("AuditJob", back_populates="agent_runs")
+    audit_job: Mapped["AuditJob"] = relationship(
+        "AuditJob", back_populates="agent_runs"
+    )
     tool_executions: Mapped[list["ToolExecution"]] = relationship(
         "ToolExecution", back_populates="agent_run", cascade="all, delete-orphan"
     )

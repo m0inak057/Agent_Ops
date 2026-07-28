@@ -6,12 +6,16 @@ computed metrics, and status.
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Float, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.db import Base
+
+if TYPE_CHECKING:
+    from backend.models.audit_job import AuditJob
 
 
 class Evaluation(Base):
@@ -32,7 +36,9 @@ class Evaluation(Base):
         DateTime, default=datetime.utcnow, nullable=False
     )
 
-    audit_job: Mapped["AuditJob"] = relationship("AuditJob", back_populates="evaluations")
+    audit_job: Mapped["AuditJob"] = relationship(
+        "AuditJob", back_populates="evaluations"
+    )
 
     def __repr__(self) -> str:
         return f"<Evaluation id={self.id} metric={self.metric!r} score={self.score}>"

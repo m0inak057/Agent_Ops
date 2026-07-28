@@ -24,7 +24,9 @@ async def list_evaluations(
     """Fetch all evaluation metrics recorded for an audit job."""
     audit_job = await db.get(AuditJob, audit_id)
     if audit_job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit job not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Audit job not found"
+        )
 
     stmt = (
         select(Evaluation)

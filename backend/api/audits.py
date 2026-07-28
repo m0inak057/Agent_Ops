@@ -23,7 +23,9 @@ from backend.services.dispatcher import dispatch_audit
 router = APIRouter(prefix="/audits", tags=["audits"])
 
 
-@router.post("", response_model=AuditJobCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "", response_model=AuditJobCreateResponse, status_code=status.HTTP_201_CREATED
+)
 async def create_audit(
     payload: AuditJobCreate,
     background_tasks: BackgroundTasks,
@@ -33,7 +35,9 @@ async def create_audit(
     try:
         repo_name = extract_repo_name(payload.repo_url)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
 
     audit_job = AuditJob(
         repo_url=payload.repo_url,
@@ -55,11 +59,15 @@ async def create_audit(
 
 
 @router.get("/{audit_id}", response_model=AuditJobResponse)
-async def get_audit(audit_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> AuditJob:
+async def get_audit(
+    audit_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> AuditJob:
     """Retrieve a single audit job's full details by ID."""
     audit_job = await db.get(AuditJob, audit_id)
     if audit_job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit job not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Audit job not found"
+        )
     return audit_job
 
 

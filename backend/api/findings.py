@@ -28,7 +28,9 @@ async def _get_audit_or_404(audit_id: uuid.UUID, db: AsyncSession) -> AuditJob:
     """Fetch an AuditJob by ID or raise 404 if it does not exist."""
     audit_job = await db.get(AuditJob, audit_id)
     if audit_job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit job not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Audit job not found"
+        )
     return audit_job
 
 
@@ -91,5 +93,7 @@ async def findings_summary(
         high=severity_counts[FindingSeverity.HIGH],
         medium=severity_counts[FindingSeverity.MEDIUM],
         low=severity_counts[FindingSeverity.LOW],
-        by_category={category.value: count for category, count in category_counts.items()},
+        by_category={
+            category.value: count for category, count in category_counts.items()
+        },
     )

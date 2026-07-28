@@ -7,12 +7,16 @@ supporting evidence, and location within the audited repository.
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.db import Base
+
+if TYPE_CHECKING:
+    from backend.models.audit_job import AuditJob
 
 
 class FindingCategory(str, enum.Enum):
@@ -69,7 +73,9 @@ class Finding(Base):
     file_path: Mapped[str | None] = mapped_column(String, nullable=True)
     line_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    auto_fix_available: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    auto_fix_available: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     fix_status: Mapped[FindingFixStatus] = mapped_column(
         Enum(FindingFixStatus, name="finding_fix_status"),
         default=FindingFixStatus.NONE,

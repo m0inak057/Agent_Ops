@@ -7,31 +7,46 @@ on:
     branches: [main]
 
 jobs:
-  backend-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install backend dependencies
-        run: pip install -r backend/requirements.txt
-
-      - name: Run backend tests
-        run: pytest backend/
-
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install flake8 black
+      - name: Run flake8
+        run: flake8 backend/ agents/ evaluation/ --max-line-length=100 --exclude=__pycache__
+      - name: Run black check
+        run: black --check backend/ agents/ evaluation/
 
-      - name: Run linter
-        run: pip install ruff && ruff check .
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Run tests
+        run: pytest evaluation/tests/ -v --tb=short
+        env:
+          OPENAI_API_KEY: placeholder
+          GITHUB_TOKEN: placeholder
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -f infrastructure/Dockerfile.backend -t agentops-backend .
+      - name: Build github_mcp image
+        run: docker build -f infrastructure/Dockerfile.github_mcp -t agentops-github-mcp .
+      - name: Build filesystem_mcp image
+        run: docker build -f infrastructure/Dockerfile.filesystem_mcp -t agentops-filesystem-mcp .
+      - name: Build test_mcp image
+        run: docker build -f infrastructure/Dockerfile.test_mcp -t agentops-test-mcp .
+      - name: Build devops_mcp image
+        run: docker build -f infrastructure/Dockerfile.devops_mcp -t agentops-devops-mcp .

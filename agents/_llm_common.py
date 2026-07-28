@@ -80,14 +80,19 @@ async def call_llm_for_findings(
         except RateLimitError:
             if attempt < 2:
                 wait_time = (attempt + 1) * 15
-                print(f"Rate limited, waiting {wait_time}s before retry {attempt + 2}/3")
+                print(
+                    f"Rate limited, waiting {wait_time}s before retry {attempt + 2}/3"
+                )
                 await asyncio.sleep(wait_time)
             else:
-                print(f"Rate limit exceeded after 3 attempts for agent_role={agent_role}")
+                print(
+                    f"Rate limit exceeded after 3 attempts for agent_role={agent_role}"
+                )
                 return []
         except Exception as e:
             print(f"LLM call failed for agent_role={agent_role}: {e}")
             import traceback
+
             print(traceback.format_exc())
             return []
 

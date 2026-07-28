@@ -22,7 +22,9 @@ from agents.performance import run_performance_audit
 from agents.repo_analyzer import analyze_repository
 from agents.security import run_security_audit
 from agents.testing import run_testing_audit
+from backend.services.prompt_optimizer import check_and_improve_prompts
 from evaluation.confidence_pipeline import validate_findings
+from evaluation.framework import run_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,9 @@ async def dispatch_audit(audit_id: uuid.UUID) -> None:
             await session.commit()
 
             repo_analyzer_run = AgentRun(
-                audit_id=audit_id, agent_role="repo_analyzer", status=AgentRunStatus.RUNNING
+                audit_id=audit_id,
+                agent_role="repo_analyzer",
+                status=AgentRunStatus.RUNNING,
             )
             session.add(repo_analyzer_run)
             await session.commit()
@@ -120,6 +124,18 @@ async def dispatch_audit(audit_id: uuid.UUID) -> None:
             await session.commit()
 
             logger.info("Audit job %s complete", audit_id)
+
+            try:
+                await run_evaluation(str(audit_id), repo_map, session)
+            except Exception as e:
+                logger.error("Evaluation failed for %s: %s", audit_id, e)
+                # Never fail the audit because evaluation failed
+
+            try:
+                await check_and_improve_prompts(session)
+            except Exception as e:
+                logger.error("Prompt optimizer failed: %s", e)
+                # Never fail the audit because the optimizer failed
 
         except Exception:
             logger.exception("Audit job %s failed", audit_id)

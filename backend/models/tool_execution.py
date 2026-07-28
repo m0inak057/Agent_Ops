@@ -7,12 +7,16 @@ of a tool call made during an agent run.
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.db import Base
+
+if TYPE_CHECKING:
+    from backend.models.agent_run import AgentRun
 
 
 class ToolExecutionStatus(str, enum.Enum):
@@ -48,7 +52,9 @@ class ToolExecution(Base):
         DateTime, default=datetime.utcnow, nullable=False
     )
 
-    agent_run: Mapped["AgentRun"] = relationship("AgentRun", back_populates="tool_executions")
+    agent_run: Mapped["AgentRun"] = relationship(
+        "AgentRun", back_populates="tool_executions"
+    )
 
     def __repr__(self) -> str:
         return (

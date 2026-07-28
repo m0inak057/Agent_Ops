@@ -38,7 +38,9 @@ async def approve_fix(
     """Approve an eligible finding's auto-fix and queue it for generation."""
     finding = await db.get(Finding, finding_id)
     if finding is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+        )
 
     if not finding.auto_fix_available:
         raise HTTPException(

@@ -16,6 +16,11 @@ from sqlalchemy import text
 from backend.api import audits, evaluations, findings, fixes
 from backend.db import SessionLocal, init_db
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
 logger = logging.getLogger(__name__)
 
 API_VERSION = "0.1.0"
@@ -61,5 +66,7 @@ async def health_check() -> dict:
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Catch unhandled exceptions and return a generic 500 response."""
-    logger.exception("Unhandled exception while processing %s %s", request.method, request.url)
+    logger.exception(
+        "Unhandled exception while processing %s %s", request.method, request.url
+    )
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})

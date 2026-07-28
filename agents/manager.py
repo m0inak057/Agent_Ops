@@ -36,7 +36,9 @@ async def synthesise_findings(all_findings: list[dict], repo_map: dict) -> dict:
 
     health_score = 100
     for severity, count in counts.items():
-        penalty = min(count * SEVERITY_PENALTY[severity], SEVERITY_PENALTY_CAP[severity])
+        penalty = min(
+            count * SEVERITY_PENALTY[severity], SEVERITY_PENALTY_CAP[severity]
+        )
         health_score -= penalty
     health_score = max(health_score, 0)
 

@@ -1,25 +1,27 @@
-name: Evaluation Gate
+name: Evaluation Quality Gate
 
+# GitHub Actions `needs` can only reference jobs within the same
+# workflow file, so this gate is chained after CI via workflow_run
+# instead of a cross-workflow `needs: [lint, test, docker-build]`.
 on:
-  pull_request:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
 
 jobs:
-  run-evaluation:
+  eval-gate:
     runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
+          python-version: '3.11'
       - name: Install dependencies
         run: pip install -r backend/requirements.txt
-
-      - name: Run evaluation framework against benchmark dataset
-        run: python -m evaluation.framework
-
-      - name: Enforce evaluation quality gate
-        run: echo "Evaluation gate placeholder — fails the build below a metric threshold."
+      - name: Run quality gate check
+        run: python check_threshold.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

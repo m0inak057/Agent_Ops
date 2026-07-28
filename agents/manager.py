@@ -6,8 +6,8 @@ computes an overall repository health score. Pure Python — no LLM call.
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
-SEVERITY_PENALTY = {"critical": 15, "high": 8, "medium": 3, "low": 1}
-SEVERITY_PENALTY_CAP = {"critical": 45, "high": 24, "medium": 12, "low": 5}
+SEVERITY_PENALTY = {"critical": 12, "high": 6, "medium": 3, "low": 1}
+SEVERITY_PENALTY_CAP = {"critical": 36, "high": 18, "medium": 15, "low": 7}
 
 
 async def synthesise_findings(all_findings: list[dict], repo_map: dict) -> dict:

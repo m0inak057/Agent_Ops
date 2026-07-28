@@ -13,12 +13,16 @@ from datetime import datetime
 from backend.db import SessionLocal
 from backend.models import AgentRun, AgentRunStatus, AuditJob, AuditJobStatus, Finding
 
+from agents.architecture import run_architecture_audit
 from agents.code_quality import run_code_quality_audit
 from agents.devops import run_devops_audit
+from agents.documentation import run_documentation_audit
 from agents.manager import synthesise_findings
+from agents.performance import run_performance_audit
 from agents.repo_analyzer import analyze_repository
 from agents.security import run_security_audit
 from agents.testing import run_testing_audit
+from evaluation.confidence_pipeline import validate_findings
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +31,9 @@ SPECIALIST_AGENTS = [
     ("code_quality", run_code_quality_audit),
     ("testing", run_testing_audit),
     ("devops", run_devops_audit),
+    ("architecture", run_architecture_audit),
+    ("performance", run_performance_audit),
+    ("documentation", run_documentation_audit),
 ]
 
 
@@ -57,11 +64,24 @@ async def dispatch_audit(audit_id: uuid.UUID) -> None:
             await session.commit()
 
             results = await asyncio.gather(
-                *(agent_fn(repo_map) for _, agent_fn in SPECIALIST_AGENTS)
+                *(agent_fn(repo_map) for _, agent_fn in SPECIALIST_AGENTS),
+                return_exceptions=True,
             )
 
             all_findings: list[dict] = []
             for (agent_role, _), findings in zip(SPECIALIST_AGENTS, results):
+                if isinstance(findings, Exception):
+                    logger.error("Agent %s failed: %s", agent_role, findings)
+                    session.add(
+                        AgentRun(
+                            audit_id=audit_id,
+                            agent_role=agent_role,
+                            status=AgentRunStatus.FAILED,
+                            findings_produced=0,
+                            ended_at=datetime.utcnow(),
+                        )
+                    )
+                    continue
                 session.add(
                     AgentRun(
                         audit_id=audit_id,
@@ -74,7 +94,9 @@ async def dispatch_audit(audit_id: uuid.UUID) -> None:
                 all_findings.extend(findings)
             await session.commit()
 
-            result = await synthesise_findings(all_findings, repo_map)
+            validated_findings = await validate_findings(all_findings, repo_map)
+
+            result = await synthesise_findings(validated_findings, repo_map)
 
             for finding in result["findings"]:
                 session.add(

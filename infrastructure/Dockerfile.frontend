@@ -1,13 +1,19 @@
 # Dockerfile for the AgentOps frontend service.
-FROM node:20-slim
-
+FROM node:20-alpine AS builder
 WORKDIR /app
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci
+COPY frontend/ .
+RUN npm run build
 
-COPY frontend/package*.json ./
-RUN npm install
-
-COPY frontend/ ./
-
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+RUN apk add --no-cache curl
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
 EXPOSE 3000
-
-CMD ["npm", "run", "dev"]
+CMD ["node", "server.js"]

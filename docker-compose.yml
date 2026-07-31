@@ -44,6 +44,7 @@ services:
       - AUTOGEN_MODEL=${AUTOGEN_MODEL}
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - ALLOWED_ORIGINS=http://localhost:3000
     ports:
       - "8000:8000"
     depends_on:
@@ -119,6 +120,25 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
       interval: 10s
       timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: .
+      dockerfile: infrastructure/Dockerfile.frontend
+    container_name: agentops_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - HOSTNAME=0.0.0.0
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 15s
+      timeout: 10s
       retries: 5
 
 volumes:

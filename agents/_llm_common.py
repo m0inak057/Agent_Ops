@@ -38,7 +38,7 @@ async def call_llm_for_findings(
     system_prompt: str,
     user_prompt: str,
     agent_role: str,
-    category: str,
+    category: str | None = None,
 ) -> list[dict]:
     """Call the LLM and parse its response into a list of finding dicts.
 
@@ -56,6 +56,22 @@ async def call_llm_for_findings(
                 max_tokens=MAX_TOKENS,
                 temperature=0.1,
             )
+            if not response.choices or response.choices[0].message.content is None:
+                if attempt < 2:
+                    wait_time = (attempt + 1) * 5
+                    print(
+                        f"Null response from provider, retrying in {wait_time}s "
+                        f"(attempt {attempt + 1}/3)"
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    print(
+                        f"Provider returned null content after 3 attempts "
+                        f"for agent_role={agent_role}"
+                    )
+                    return []
+
             content = response.choices[0].message.content
             findings = _extract_json_array(content)
 
@@ -66,7 +82,7 @@ async def call_llm_for_findings(
                 results.append(
                     {
                         "agent_role": agent_role,
-                        "category": category,
+                        "category": category or finding.get("category"),
                         "severity": finding.get("severity"),
                         "title": finding.get("title"),
                         "detail": finding.get("detail"),

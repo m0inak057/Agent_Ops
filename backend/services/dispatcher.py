@@ -1,11 +1,10 @@
 """Service responsible for dispatching audit jobs to the agent team.
 
-Runs the repo analyzer, fans the repo map out to the four specialist
-agents concurrently, synthesises their findings, and persists everything
-back to the database.
+Runs the repo analyzer, then a single unified agent call over the repo
+map, synthesises the findings, and persists everything back to the
+database.
 """
 
-import asyncio
 import logging
 import uuid
 from datetime import datetime
@@ -15,31 +14,15 @@ from sqlalchemy import select
 from backend.db import SessionLocal
 from backend.models import AgentRun, AgentRunStatus, AuditJob, AuditJobStatus, Finding
 
-from agents.architecture import run_architecture_audit
-from agents.code_quality import run_code_quality_audit
-from agents.devops import run_devops_audit
-from agents.documentation import run_documentation_audit
 from agents.manager import synthesise_findings
-from agents.performance import run_performance_audit
 from agents.repo_analyzer import analyze_repository
-from agents.security import run_security_audit
-from agents.testing import run_testing_audit
+from agents.unified_agent import run_unified_audit
 from backend.services.notifier import notify_new_findings
 from backend.services.prompt_optimizer import check_and_improve_prompts
 from evaluation.confidence_pipeline import validate_findings
 from evaluation.framework import run_evaluation
 
 logger = logging.getLogger(__name__)
-
-SPECIALIST_AGENTS = [
-    ("security", run_security_audit),
-    ("code_quality", run_code_quality_audit),
-    ("testing", run_testing_audit),
-    ("devops", run_devops_audit),
-    ("architecture", run_architecture_audit),
-    ("performance", run_performance_audit),
-    ("documentation", run_documentation_audit),
-]
 
 
 async def dispatch_audit(audit_id: uuid.UUID) -> None:
@@ -70,35 +53,26 @@ async def dispatch_audit(audit_id: uuid.UUID) -> None:
             repo_analyzer_run.ended_at = datetime.utcnow()
             await session.commit()
 
-            results = await asyncio.gather(
-                *(agent_fn(repo_map) for _, agent_fn in SPECIALIST_AGENTS),
-                return_exceptions=True,
+            # Single unified agent call — replaces 7 separate LLM calls
+            logger.info(f"Running unified agent for audit {audit_id}")
+            unified_run = AgentRun(
+                audit_id=audit_id,
+                agent_role="unified",
+                status=AgentRunStatus.RUNNING,
             )
+            session.add(unified_run)
+            await session.commit()
 
-            all_findings: list[dict] = []
-            for (agent_role, _), findings in zip(SPECIALIST_AGENTS, results):
-                if isinstance(findings, Exception):
-                    logger.error("Agent %s failed: %s", agent_role, findings)
-                    session.add(
-                        AgentRun(
-                            audit_id=audit_id,
-                            agent_role=agent_role,
-                            status=AgentRunStatus.FAILED,
-                            findings_produced=0,
-                            ended_at=datetime.utcnow(),
-                        )
-                    )
-                    continue
-                session.add(
-                    AgentRun(
-                        audit_id=audit_id,
-                        agent_role=agent_role,
-                        status=AgentRunStatus.SUCCESS,
-                        findings_produced=len(findings),
-                        ended_at=datetime.utcnow(),
-                    )
-                )
-                all_findings.extend(findings)
+            try:
+                all_findings = await run_unified_audit(repo_map)
+                unified_run.status = AgentRunStatus.SUCCESS
+                unified_run.findings_produced = len(all_findings)
+            except Exception as e:
+                logger.error(f"Unified agent failed: {e}")
+                all_findings = []
+                unified_run.status = AgentRunStatus.FAILED
+
+            unified_run.ended_at = datetime.utcnow()
             await session.commit()
 
             validated_findings = await validate_findings(all_findings, repo_map)

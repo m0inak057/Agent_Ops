@@ -1,374 +1,306 @@
 # Architecture — AgentOps
 
-This document covers the full system architecture: how data flows, how agents are isolated, how MCP servers are structured, and what the database looks like.
+This document covers the full system architecture: how data flows through an audit, what the folder structure actually contains, what state each MCP server is in, and what the database looks like.
 
 ---
 
 ## Core Design Principles
 
-**1. Agents never touch external systems directly.**
-Every agent action goes through an MCP server. This creates a controlled, auditable boundary between thinking (AutoGen) and doing (MCP tools).
+**1. The backend is a dispatcher, not a monolith.**
+`FastAPI` receives a repo URL, creates an `AuditJob` row, and fires a background task (`backend/services/dispatcher.py`) that runs the pipeline to completion. The backend does not contain agent logic itself — it imports and calls into `agents/` and `evaluation/`.
 
-**2. Every finding has a confidence score.**
-The evaluation pipeline validates every agent finding before it reaches the user. Findings below 85% confidence are shown with evidence only. Auto-fixes are only allowed above 95% confidence.
+**2. One LLM call replaces seven.**
+`agents/unified_agent.py` sends the repo map to the LLM once, asking it to reason about all 7 audit dimensions (security, code_quality, architecture, performance, testing, devops, documentation) in a single prompt. The 7 individual specialist agent files (`security.py`, `code_quality.py`, etc.) still exist in the codebase but are not called by the dispatcher — see [AGENTS.md](./AGENTS.md).
 
-**3. The backend is an event dispatcher, not a monolith.**
-FastAPI receives a repo URL, emits an event, and the AutoGen team picks it up. The backend does not contain agent logic.
+**3. Confidence validation is rule-based, not LLM-based.**
+`evaluation/confidence_pipeline.py` checks evidence quality (detail length, file existence in the repo tree) and adjusts each finding's confidence score. It makes zero LLM calls — this was a deliberate change to cut per-audit cost and latency.
 
-**4. Evaluation is a first-class citizen.**
-Every agent run produces structured evaluation data. The CI/CD pipeline consumes this data. The self-improvement loop reads it. The dashboard visualises it.
+**4. Evaluation is a second, independent LLM call.**
+After an audit completes, `evaluation/framework.py` computes deterministic agent/finding/system metrics and makes exactly one more LLM call (`evaluation/metrics/llm_judge.py`) to score overall audit quality. This is the second and last LLM call per audit.
 
-**5. Static analysis tools are integrated, not replaced.**
-The Security Agent runs Bandit, Semgrep, and Trivy. The LLM interprets and contextualises the results. It does not try to replace these tools with pure LLM judgment.
+**5. Agents never touch external systems directly.**
+`repo_analyzer.py` reaches GitHub only through `github_mcp`, over the MCP stdio protocol. This is the only MCP server actually exercised during an audit today.
 
 ---
 
 ## System Data Flow
 
+This is the actual 9-step flow implemented in `backend/services/dispatcher.py`:
+
 ```
-┌─────────────────────────────────────────────────────────┐
-│                  User / GitHub Webhook                   │
-│           (pastes repo URL or commit triggers audit)     │
-└───────────────────────────┬─────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│                   FastAPI Backend                        │
-│  - Receives repo URL                                     │
-│  - Writes to PostgreSQL (AuditJobs table)                │
-│  - Dispatches event to AutoGen team                      │
-│  - Exposes REST + WebSocket API for frontend             │
-└───────────────────────────┬─────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│               AutoGen Multi-Agent Team                   │
-│                                                          │
-│  Manager ──► Repository Analyzer                         │
-│                      │                                   │
-│       ┌──────────────┼──────────────┐                   │
-│       │              │              │                    │
-│  Code Quality    Security      Architecture              │
-│  Agent           Agent         Agent                     │
-│       │              │              │                    │
-│  Performance    Testing        DevOps                    │
-│  Agent          Agent          Agent                     │
-│       │              │              │                    │
-│  Documentation Agent                                     │
-│       │                                                  │
-│  Manager synthesises all findings                        │
-│       │                                                  │
-│  Evaluation Pipeline (confidence scoring)                │
-│       │                                                  │
-│  [Optional] Developer Agent → auto-fix → PR              │
-└───────────────────────────┬─────────────────────────────┘
-                            │
-              ┌─────────────┼──────────────┐
-              │             │              │
-              ▼             ▼              ▼
-        github_mcp   filesystem_mcp   test_mcp
-              │                           │
-              ▼                           ▼
-         GitHub API               Pytest/Bandit/
-                                  Semgrep/Trivy
-                            │
-                            ▼
-                       devops_mcp
-                            │
-                            ▼
-                   Docker / CI inspection
+1. FastAPI receives POST /api/audits, validates the GitHub URL,
+   creates an AuditJob (status: pending), and fires a background task.
+                              │
+                              ▼
+2. repo_analyzer.py spawns github_mcp over MCP stdio, fetches the
+   repo tree and up to 5 key files (requirements.txt/package.json,
+   Dockerfile, docker-compose.yml, a CI workflow file, README.md).
+                              │
+                              ▼
+3. unified_agent.py sends the repo_map to the LLM in ONE call
+   covering all 7 dimensions at once. Returns 5-15 findings.
+                              │
+                              ▼
+4. confidence_pipeline.py runs RULE-BASED validation only
+   (no LLM call) — checks title/detail quality, whether the cited
+   file_path exists in the repo tree, and discards or downgrades
+   confidence accordingly.
+                              │
+                              ▼
+5. manager.py deduplicates findings by title, sorts by severity
+   and confidence, and calculates a 0–100 health score from
+   severity-weighted penalties. Pure Python — no LLM call.
+                              │
+                              ▼
+6. All findings + the AgentRun records are written to PostgreSQL.
+   AuditJob is marked complete.
+                              │
+                              ▼
+7. notifier.py diffs the new findings against the previous
+   completed audit for the same repo_url, and logs new/resolved
+   findings.
+                              │
+                              ▼
+8. evaluation/framework.py runs 4 metric groups concurrently
+   (agent_metrics, finding_metrics, system_metrics — all
+   deterministic — plus llm_judge, one LLM call), and writes each
+   scored metric as a row in the evaluations table.
+                              │
+                              ▼
+9. prompt_optimizer.py checks the average agent_success_rate over
+   the last 5 completed audits; if it's below 0.80, it drafts and
+   benchmarks an improved prompt for the worst-performing agent
+   role and promotes it if the benchmark score improves.
 ```
+
+Every step from 6 onward is wrapped in its own try/except in `dispatcher.py` — a notifier, evaluation, or prompt-optimizer failure never fails the audit itself.
+
+**Total LLM calls per audit: 2** — the unified agent call (step 3) and the audit-quality judge call (step 8).
+
+**LLM provider:** OpenRouter, or any OpenAI-compatible endpoint, configured via `OPENAI_BASE_URL`. Model is set via `AUTOGEN_MODEL`.
 
 ---
 
-## Folder Structure — Detailed
+## Folder Structure — Actual
 
 ```
 agentops/
 │
 ├── frontend/
-│   ├── app/
-│   │   ├── dashboard/              # Main health score dashboard
-│   │   ├── audits/                 # Individual audit viewer (finding by finding)
-│   │   ├── findings/               # All findings across all audits
-│   │   └── evaluations/            # Agent evaluation history and trends
-│   ├── components/                 # Shadcn UI components
-│   └── lib/                        # API client, WebSocket hooks
+│   └── src/
+│       ├── app/
+│       │   ├── page.tsx                # Landing / submit-audit page
+│       │   ├── dashboard/page.tsx      # Health score dashboard
+│       │   ├── audits/[id]/page.tsx    # Individual audit viewer
+│       │   ├── findings/page.tsx       # All findings
+│       │   └── evaluations/page.tsx    # Evaluation history
+│       └── components/
+│           ├── Navbar.tsx, AuditCard.tsx, FindingCard.tsx
+│           ├── SeverityBadge.tsx, StatusBadge.tsx
+│           ├── HealthScoreRing.tsx, ConfidenceBar.tsx
+│           ├── CategoryScores.tsx, LiveAuditProgress.tsx
 │
 ├── backend/
 │   ├── main.py                     # FastAPI app entry point
+│   ├── db.py                       # Async SQLAlchemy engine, session factory
+│   ├── schemas.py                  # Pydantic request/response models
+│   ├── alembic/                    # DB migrations
 │   ├── api/
-│   │   ├── audits.py               # POST /audits — submit repo URL
-│   │   ├── findings.py             # GET /findings — audit findings
-│   │   ├── evaluations.py          # GET /evaluations — agent scores
-│   │   └── fixes.py                # POST /fixes — trigger auto-fix
-│   ├── models/
-│   │   ├── audit_job.py            # AuditJob model
-│   │   ├── agent_run.py            # AgentRun model
-│   │   ├── finding.py              # Finding model
-│   │   ├── tool_execution.py       # ToolExecution model
-│   │   ├── evaluation.py           # Evaluation model
-│   │   └── prompt_variation.py     # PromptVariation model
+│   │   ├── audits.py                # POST/GET /api/audits
+│   │   ├── findings.py              # GET /api/findings/{audit_id} (+ /summary)
+│   │   ├── evaluations.py           # GET /api/evaluations/{audit_id}
+│   │   ├── fixes.py                 # POST /api/fixes/{finding_id}/approve
+│   │   └── webhooks.py              # POST /api/webhooks/github, GET /health
+│   ├── models/                     # SQLAlchemy ORM models (one file per table)
 │   ├── services/
-│   │   ├── dispatcher.py           # Emits events to AutoGen
-│   │   ├── evaluator.py            # Runs confidence scoring pipeline
-│   │   └── prompt_optimizer.py     # Self-improvement loop
-│   └── db.py                       # PostgreSQL connection, session factory
+│   │   ├── dispatcher.py            # Runs the full pipeline for one AuditJob
+│   │   ├── evaluator.py             # Thin wrapper used by the evaluations API
+│   │   ├── notifier.py              # Diffs findings against the previous audit
+│   │   └── prompt_optimizer.py      # Self-improvement loop
+│   └── tests/                      # test_api.py, test_manager.py
 │
 ├── agents/
-│   ├── team.py                     # AutoGen GroupChat configuration
-│   ├── manager.py                  # Manager + synthesis agent
-│   ├── repo_analyzer.py            # Repository understanding agent
-│   ├── code_quality.py             # Code Quality agent
-│   ├── security.py                 # Security agent
-│   ├── architecture.py             # Architecture agent
-│   ├── performance.py              # Performance agent
-│   ├── testing.py                  # Testing agent
-│   ├── devops.py                   # DevOps agent
-│   ├── documentation.py            # Documentation agent
-│   ├── developer.py                # Developer agent (auto-fix only)
-│   ├── prompts/
-│   │   ├── manager.txt
-│   │   ├── repo_analyzer.txt
-│   │   ├── code_quality.txt
-│   │   ├── security.txt
-│   │   ├── architecture.txt
-│   │   ├── performance.txt
-│   │   ├── testing.txt
-│   │   ├── devops.txt
-│   │   ├── documentation.txt
-│   │   └── developer.txt
-│   └── tools/
-│       ├── github_client.py
-│       ├── filesystem_client.py
-│       ├── test_client.py
-│       └── devops_client.py
+│   ├── unified_agent.py            # ACTIVE — single LLM call, all 7 dimensions
+│   ├── repo_analyzer.py            # ACTIVE — fetches repo via github_mcp
+│   ├── manager.py                  # ACTIVE — dedup, sort, health score (no LLM)
+│   ├── developer.py                # Auto-fix agent — not wired into the pipeline
+│   ├── _llm_common.py              # Shared OpenAI-client call/parse helper
+│   ├── team.py                     # Legacy grouping of agent references
+│   ├── security.py, code_quality.py, architecture.py,
+│   │   performance.py, testing.py, devops.py, documentation.py
+│   │                               # NOT called by the dispatcher today —
+│   │                               # preserved for a future specialist mode
+│   ├── prompts/                    # Per-agent system prompt text files
+│   └── tools/                      # MCP client connectors
+│       ├── github_client.py        # Used by repo_analyzer.py
+│       ├── filesystem_client.py, test_client.py, devops_client.py
 │
 ├── mcp_servers/
-│   ├── github_mcp/
+│   ├── github_mcp/                 # ACTIVE — used on every audit
 │   │   ├── server.py
-│   │   └── tools/
-│   │       ├── clone_repository.py
-│   │       ├── get_repository_tree.py
-│   │       ├── read_file.py
-│   │       ├── search_code.py
-│   │       ├── create_branch.py
-│   │       ├── create_commit.py
-│   │       └── create_pull_request.py
-│   ├── filesystem_mcp/
-│   │   ├── server.py
-│   │   └── tools/
-│   │       ├── read_file.py
-│   │       ├── write_file.py
-│   │       ├── list_directory.py
-│   │       └── search_files.py
-│   ├── test_mcp/
-│   │   ├── server.py
-│   │   └── tools/
-│   │       ├── run_tests.py
-│   │       ├── run_coverage.py
-│   │       ├── run_linter.py
-│   │       ├── run_bandit.py
-│   │       ├── run_semgrep.py
-│   │       └── run_trivy.py
-│   └── devops_mcp/
-│       ├── server.py
-│       └── tools/
-│           ├── inspect_dockerfile.py
-│           ├── inspect_docker_compose.py
-│           ├── inspect_ci_pipeline.py
-│           ├── check_env_files.py
-│           └── get_dependency_vulnerabilities.py
+│   │   └── tools/ (clone_repository, get_repository_tree, read_file,
+│   │                search_code, create_branch, create_commit,
+│   │                create_pull_request)
+│   ├── filesystem_mcp/             # Built + running, standby for auto-fix
+│   ├── test_mcp/                   # Built + running, standby for auto-fix
+│   └── devops_mcp/                 # Built + running, standby for auto-fix
 │
 ├── evaluation/
-│   ├── framework.py
-│   ├── confidence_pipeline.py      # Validates agent findings
+│   ├── framework.py                 # Orchestrates all metric groups + LLM judge
+│   ├── confidence_pipeline.py       # Rule-based finding validation (no LLM)
+│   ├── seed_benchmarks.py
 │   ├── metrics/
-│   │   ├── finding_metrics.py      # Finding accuracy, false positive rate
-│   │   ├── agent_metrics.py        # Tool accuracy, turn count, retries
-│   │   ├── llm_judge.py            # LLM-as-a-Judge scoring
-│   │   └── system_metrics.py       # Latency, token cost, failure rate
-│   └── benchmarks/
-│       └── dataset.json            # Known repos with known issues
+│   │   ├── agent_metrics.py         # success rate, turns, cost, tokens (from DB)
+│   │   ├── finding_metrics.py       # avg confidence, severity mix, auto-fix rate
+│   │   ├── system_metrics.py        # latency, health score, finding count
+│   │   └── llm_judge.py             # 1 LLM call: relevance/depth/coverage/actionability
+│   ├── benchmarks/
+│   │   └── dataset.json             # Known repos with known_findings
+│   └── tests/                       # test_confidence_pipeline.py + conftest.py
 │
 ├── infrastructure/
-│   ├── Dockerfile.backend
-│   ├── Dockerfile.frontend
-│   ├── Dockerfile.github_mcp
-│   ├── Dockerfile.filesystem_mcp
-│   ├── Dockerfile.test_mcp
-│   └── Dockerfile.devops_mcp
+│   ├── Dockerfile.backend, Dockerfile.frontend
+│   ├── Dockerfile.github_mcp, Dockerfile.filesystem_mcp
+│   ├── Dockerfile.test_mcp, Dockerfile.devops_mcp
 │
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml                  # Lint, test, Docker build
-│       └── eval_gate.yml           # AI evaluation quality gate
+│       ├── ci.yml                  # Lint (flake8+black), pytest, Docker builds, frontend build
+│       └── eval_gate.yml           # Runs check_threshold.py as a quality gate
 │
+├── check_threshold.py              # Reads Evaluations table, fails CI if below threshold
 ├── docker-compose.yml
-├── .env.example
-└── README.md
+└── .env.example
 ```
 
 ---
 
-## MCP Server Design
+## MCP Server Status
 
-Each MCP server is a completely isolated Python process. Agents communicate with them via the Python MCP SDK — they cannot call arbitrary shell commands or access systems outside what the MCP server explicitly exposes.
+| Server | Status | Used By |
+|---|---|---|
+| `github_mcp` | **Active** | `repo_analyzer.py` on every audit — fetches repo tree and key files over MCP stdio |
+| `filesystem_mcp` | Built, running in Docker Compose | Standby — reserved for the auto-fix pipeline |
+| `test_mcp` | Built, running in Docker Compose | Standby — reserved for the auto-fix pipeline |
+| `devops_mcp` | Built, running in Docker Compose | Standby — reserved for the auto-fix pipeline |
 
-### Why This Matters
-
-```
-# Without MCP (dangerous)
-agent.run("git clone https://github.com/... && cat secrets.env")
-
-# With MCP (controlled)
-agent.call_tool("github_mcp", "read_file", {
-    "repo": "org/repo",
-    "path": "users/auth.py"
-})
-# The MCP server validates the path, enforces read-only access, logs the call
-```
-
-### Tool Permissions Per Agent
-
-| Agent | github_mcp | filesystem_mcp | test_mcp | devops_mcp |
-|---|---|---|---|---|
-| Repository Analyzer | Read | ✗ | ✗ | ✗ |
-| Code Quality Agent | Read | ✗ | Lint only | ✗ |
-| Security Agent | Read | ✗ | Bandit/Semgrep/Trivy | ✗ |
-| Architecture Agent | Read | ✗ | ✗ | ✗ |
-| Performance Agent | Read | ✗ | ✗ | ✗ |
-| Testing Agent | Read | ✗ | Full | ✗ |
-| DevOps Agent | Read | ✗ | ✗ | Full |
-| Documentation Agent | Read | ✗ | ✗ | ✗ |
-| Developer Agent (fix) | Read + Write | Read + Write | Run tests | ✗ |
+All four servers pass their own `/health` checks in `docker-compose.yml`. Only `github_mcp` is imported and called from the audit dispatch path (`backend/services/dispatcher.py` → `agents/repo_analyzer.py` → `agents/tools/github_client.py`).
 
 ---
 
 ## PostgreSQL Database Schema
 
-### AuditJobs
-
-Tracks every repository audit submitted to the platform.
+### audit_jobs
 
 | Column | Type | Notes |
 |---|---|---|
 | id | UUID | Primary key |
 | repo_url | TEXT | Target GitHub repository URL |
-| repo_name | TEXT | Extracted repo name |
+| repo_name | TEXT | Nullable |
 | status | ENUM | pending / analyzing / complete / failed |
-| health_score | INT | Overall score 0–100, nullable until complete |
+| health_score | INT | Nullable until complete |
 | created_at | TIMESTAMP | |
 | completed_at | TIMESTAMP | Nullable |
 
-### Findings
-
-One record per issue found by any agent.
+### findings
 
 | Column | Type | Notes |
 |---|---|---|
 | id | UUID | Primary key |
-| audit_id | UUID | FK → AuditJobs |
-| agent_role | TEXT | Which agent found this |
-| category | TEXT | security / code_quality / architecture / performance / testing / devops / documentation |
+| audit_id | UUID | FK → audit_jobs |
+| agent_role | TEXT | Which agent/category produced this (unified agent tags by category) |
+| category | ENUM | security / code_quality / architecture / performance / testing / devops / documentation |
 | severity | ENUM | critical / high / medium / low |
-| title | TEXT | Short description |
+| title | TEXT | |
 | detail | TEXT | Full explanation with evidence |
-| file_path | TEXT | Relevant file, nullable |
+| file_path | TEXT | Nullable |
 | line_number | INT | Nullable |
 | confidence | FLOAT | 0.0 – 1.0 |
-| auto_fix_available | BOOLEAN | |
+| auto_fix_available | BOOLEAN | Forced false by the confidence pipeline below 0.95 |
 | fix_status | ENUM | none / suggested / approved / pr_created / merged |
+| pr_url | TEXT | Nullable |
 | created_at | TIMESTAMP | |
 
-### AgentRuns
-
-One record per agent invocation within an audit.
+### agent_runs
 
 | Column | Type | Notes |
 |---|---|---|
 | id | UUID | Primary key |
-| audit_id | UUID | FK → AuditJobs |
-| agent_role | TEXT | repo_analyzer / security / code_quality / etc. |
-| tokens_used | INT | |
-| cost_usd | FLOAT | |
-| turns | INT | Number of AutoGen turns |
-| findings_produced | INT | How many findings this agent raised |
-| status | ENUM | success / failed / retried |
+| audit_id | UUID | FK → audit_jobs |
+| agent_role | TEXT | `repo_analyzer` or `unified` |
+| tokens_used | INT | Always 0 today — not yet instrumented |
+| cost_usd | FLOAT | Always 0 today — not yet instrumented |
+| turns | INT | Always 0 today (no multi-turn loop) |
+| findings_produced | INT | |
+| status | ENUM | running / success / failed / retried |
 | started_at | TIMESTAMP | |
-| ended_at | TIMESTAMP | |
+| ended_at | TIMESTAMP | Nullable |
 
-### ToolExecutions
-
-Granular log of every MCP tool call made.
+### tool_executions
 
 | Column | Type | Notes |
 |---|---|---|
 | id | UUID | Primary key |
-| run_id | UUID | FK → AgentRuns |
-| mcp_server | TEXT | github_mcp / filesystem_mcp / test_mcp / devops_mcp |
-| tool_name | TEXT | e.g. read_file, run_bandit |
-| input_args | JSONB | Arguments passed |
-| output | JSONB | Tool response |
+| run_id | UUID | FK → agent_runs |
+| mcp_server | TEXT | e.g. github_mcp |
+| tool_name | TEXT | e.g. read_file |
+| input_args | JSON | Nullable |
+| output | JSON | Nullable |
 | status | ENUM | success / failed / timeout |
-| latency_ms | INT | |
+| latency_ms | INT | Nullable |
 | called_at | TIMESTAMP | |
 
-### Evaluations
-
-Stores every evaluation score produced by the confidence pipeline.
+### evaluations
 
 | Column | Type | Notes |
 |---|---|---|
 | id | UUID | Primary key |
-| audit_id | UUID | FK → AuditJobs |
-| metric | TEXT | e.g. finding_accuracy, tool_selection_accuracy |
-| score | FLOAT | 0.0 – 1.0 or raw value |
-| feedback | TEXT | LLM judge reasoning, nullable |
+| audit_id | UUID | FK → audit_jobs |
+| metric | TEXT | e.g. agent_success_rate, average_confidence, audit_quality_finding_relevance |
+| score | FLOAT | |
+| feedback | TEXT | Nullable — LLM judge reasoning, or a human-readable note for deterministic metrics |
 | evaluated_at | TIMESTAMP | |
 
-### PromptVariations
-
-Powers the self-improvement loop.
+### prompt_variations
 
 | Column | Type | Notes |
 |---|---|---|
 | id | UUID | Primary key |
-| agent_role | TEXT | Which agent this prompt is for |
+| agent_role | TEXT | Which agent role this prompt is for |
 | prompt_text | TEXT | Full system prompt |
-| avg_score | FLOAT | Average score across benchmark runs |
+| avg_score | FLOAT | Nullable |
 | is_active | BOOLEAN | Currently deployed prompt |
 | created_at | TIMESTAMP | |
 | promoted_at | TIMESTAMP | Nullable |
 
 ---
 
-## End-to-End Event Flow
+## API Endpoints (all implemented)
 
-```
-1.  User submits GitHub repo URL via dashboard or webhook
-2.  FastAPI creates AuditJob record (status: pending)
-3.  FastAPI dispatches event to AutoGen team
-4.  Repository Analyzer clones and maps the repo structure
-5.  Manager creates analysis plan, updates AuditJob (status: analyzing)
-6.  7 specialist agents run (parallel where possible):
-      Each agent reads the repo via github_mcp
-      Each agent uses its specific tools (test_mcp, devops_mcp, etc.)
-      Each agent produces a list of findings
-7.  Manager receives all findings, deduplicates and prioritises
-8.  Confidence Pipeline validates every finding:
-      > 95%  → auto-fix allowed
-      85–95% → suggest to user
-      < 85%  → show evidence only
-9.  Findings written to database, health score calculated
-10. AuditJob marked complete, dashboard updates via WebSocket
-11. User reviews findings
-      └── If user approves auto-fix:
-            Developer Agent writes fix to sandbox
-            Test Agent verifies nothing breaks
-            github_mcp creates PR
-            Finding status updated to pr_created
-12. CI/CD evaluates the agents themselves after each audit
-      └── If agent quality drops → deployment blocked
-             → self-improvement loop triggered
-```
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/audits` | Submit a repo URL, creates an AuditJob and dispatches the background task |
+| `GET /api/audits` | List all audits |
+| `GET /api/audits/{id}` | Get a single audit's details |
+| `GET /api/findings/{audit_id}` | List findings for an audit |
+| `GET /api/findings/{audit_id}/summary` | Severity counts for an audit |
+| `GET /api/evaluations/{audit_id}` | Evaluation metric rows for an audit |
+| `POST /api/fixes/{finding_id}/approve` | Approve a `confidence >= 0.95` finding's auto-fix — queues a background task that currently only logs (see [ROADMAP.md](./ROADMAP.md)) |
+| `POST /api/webhooks/github` | GitHub push webhook — verifies HMAC signature, triggers a re-audit for pushes to main/master |
+| `GET /api/webhooks/health` | Webhook endpoint health check |
+| `GET /health` | Backend health check |
+
+---
+
+## Docker Services
+
+| Service | Port | Status |
+|---|---|---|
+| `agentops_backend` | 8000 | FastAPI |
+| `agentops_db` | 5432 | PostgreSQL 15 |
+| `agentops_redis` | 6380→6379 | Built, standby (not read from anywhere yet) |
+| `agentops_frontend` | 3000 | Next.js dashboard |
+| `agentops_github_mcp` | 8001 | Active in the audit pipeline |
+| `agentops_filesystem_mcp` | 8002 | Running, standby |
+| `agentops_test_mcp` | 8003 | Running, standby |
+| `agentops_devops_mcp` | 8004 | Running, standby |

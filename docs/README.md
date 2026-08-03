@@ -2,12 +2,12 @@
 
 > **AI-Powered Autonomous Codebase Auditor & Engineering Assistant**
 
-AgentOps is a production-style LLMOps platform where a coordinated team of AI agents autonomously investigates an entire GitHub repository — identifying bugs, security vulnerabilities, performance bottlenecks, architectural problems, testing gaps, and DevOps issues — explains why they matter, prioritises them by severity and confidence, and optionally fixes high-confidence issues by creating a Pull Request.
+AgentOps is an LLMOps platform that autonomously investigates a GitHub repository — identifying bugs, security vulnerabilities, performance bottlenecks, architectural problems, testing gaps, DevOps issues, and documentation gaps — explains why they matter, prioritises them by severity and confidence, and calculates an overall health score. Every audit is itself evaluated for quality by a second LLM call and a set of deterministic metrics, feeding a CI/CD quality gate and a self-improvement loop.
 
 **The core value proposition:**
 > "You don't need to know what's wrong with your project. AgentOps investigates it for you."
 
-This is not a demo. Every finding includes evidence, severity, and a confidence score. Findings below the confidence threshold are never auto-fixed. The agents themselves are continuously evaluated through a CI/CD quality gate.
+Every finding includes evidence, severity, and a confidence score. Findings below the confidence threshold are never marked auto-fixable. The pipeline itself is continuously evaluated through a CI/CD quality gate.
 
 ---
 
@@ -25,44 +25,50 @@ AgentOps is that senior engineer. Point it at your repository and it tells you e
 User pastes: https://github.com/username/my-project
 ```
 
-**Step 1 — Repository Understanding**
+**Step 1 — Repo Analyzer fetches repo context via github_mcp**
 ```
 Project Type:     Django + React
 Languages:        Python, JavaScript
-Database:         PostgreSQL
-Infrastructure:   Docker
-Testing:          pytest
-CI/CD:            None detected
-Dependencies:     42
-Files:            137
-Lines of Code:    28,431
+Has Dockerfile:   true
+Has CI/CD:        false
+Has Tests:        true
+Has README:       true
+Total Files:      137
 ```
 
-**Step 2 — 7 Specialist Agents audit in parallel**
+**Step 2 — One LLM call covers all 7 audit dimensions**
 
 ```
-Manager Agent
+POST /api/audits
       │
       ▼
-Repository Analyzer
-      │
-      ├── Code Quality Agent
-      ├── Security Agent        (+ Bandit, Semgrep, Trivy)
-      ├── Architecture Agent
-      ├── Performance Agent
-      ├── Testing Agent
-      ├── DevOps Agent
-      └── Documentation Agent
+repo_analyzer.py ──► github_mcp (fetches tree + 5 key files)
       │
       ▼
-Manager synthesises all findings
+unified_agent.py ──► single LLM call
+      (security, code_quality, architecture, performance,
+       testing, devops, documentation — all in one prompt)
       │
       ▼
-Evaluation Pipeline validates confidence of every finding
+confidence_pipeline.py (rule-based validation, no LLM call)
       │
       ▼
-Health Report delivered
+manager.py (dedup + sort + health score — pure Python)
+      │
+      ▼
+Findings + AgentRuns written to PostgreSQL
+      │
+      ▼
+notifier.py diffs against the previous audit for this repo
+      │
+      ▼
+evaluation/framework.py — 4 metric groups + 1 LLM judge call
+      │
+      ▼
+prompt_optimizer.py checks last 5 audits, may trigger self-improvement
 ```
+
+Two LLM calls total per audit: the unified audit call and the evaluation quality-judge call.
 
 **Step 3 — You receive a Health Report**
 ```
@@ -70,14 +76,6 @@ PROJECT HEALTH SCORE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Overall:          71 / 100
-
-Security          82
-Code Quality      76
-Architecture      68
-Performance       61
-Testing           43
-DevOps            58
-Documentation     81
 
 🔴 CRITICAL — Fix Immediately
   1. JWT secret hardcoded in users/auth.py (Confidence: 99%)
@@ -94,15 +92,11 @@ Documentation     81
   8. API endpoints undocumented
 ```
 
-**Step 4 — Optional: Auto-fix high-confidence issues**
-```
-Issue #1 — Hardcoded JWT Secret   Confidence: 99%
-[Explain]  [Show Code]  [Fix Automatically]
+Health score is computed deterministically from severity counts (see [ARCHITECTURE.md](./ARCHITECTURE.md)) — it is not an LLM output.
 
-→ Developer Agent writes fix to sandbox
-→ Test Agent verifies nothing breaks
-→ Pull Request created on your repository
-```
+**Step 4 — Auto-fix (endpoint exists, execution not yet wired)**
+
+`POST /api/fixes/{finding_id}/approve` accepts approval for findings with `confidence >= 0.95` and `auto_fix_available = true`, and queues a background task. That background task currently only logs the request — it does not yet write a fix, run tests, or open a PR. See "What's Not Built Yet" below.
 
 ---
 
@@ -113,48 +107,53 @@ User pastes GitHub repo URL
             │
             ▼
      FastAPI Backend
-     (event dispatcher)
+  (creates AuditJob, fires
+   background dispatch task)
             │
             ▼
-   AutoGen Multi-Agent Team
+      repo_analyzer.py
+    (fetches repo via github_mcp)
             │
-     ┌──────┴──────┐
-     │             │
-     ▼             ▼
-Repository    7 Specialist
- Analyzer       Agents
-     │             │
-     └──────┬──────┘
+            ▼
+      unified_agent.py
+   (1 LLM call, all 7 dimensions)
             │
-     Manager synthesises
+            ▼
+   confidence_pipeline.py
+   (rule-based validation only)
             │
-   Evaluation Pipeline
-   (confidence scoring)
+            ▼
+        manager.py
+ (dedup, sort, health score)
             │
-       ┌────┴────┐
-       │         │
-    Report    Auto-fix
-       │         │
-       ▼         ▼
-   Dashboard   PR on
-              GitHub
+      ┌─────┴─────┐
+      │           │
+ PostgreSQL   notifier.py
+              (diff vs. last audit)
+      │
+      ▼
+ evaluation/framework.py
+ (4 metric groups + LLM judge)
+      │
+      ▼
+ prompt_optimizer.py
+ (self-improvement loop)
 ```
 
-> Agents never access external systems directly. All interactions go through isolated **MCP Servers** that expose controlled, typed tools.
+> `github_mcp` is the only MCP server actively used in the audit pipeline today. `filesystem_mcp`, `test_mcp`, and `devops_mcp` are built and running in Docker Compose but are standby — reserved for the auto-fix pipeline once it's wired up.
 
 ---
 
 ## Confidence Threshold System
 
-Every finding goes through the evaluation pipeline before reaching the user.
+Every finding passes through the confidence pipeline (rule-based checks — evidence exists, detail is substantial, file path is real) before being written to the database.
 
 ```
-Confidence > 95%  →  Auto-fix allowed
-85% – 95%         →  Suggest fix, requires user approval
-< 85%             →  Explain and show evidence only, no auto-fix
+Confidence >= 95%  →  auto_fix_available may remain true
+< 95%               →  auto_fix_available forced to false
 ```
 
-This is AI evaluation as a core product feature, not a checkbox.
+Approving a fix via the API additionally requires `confidence >= 0.95` server-side.
 
 ---
 
@@ -162,15 +161,14 @@ This is AI evaluation as a core product feature, not a checkbox.
 
 | Feature | Description |
 |---|---|
-| **Multi-Agent Audit** | 7 specialist agents cover code quality, security, architecture, performance, testing, DevOps, and documentation |
-| **Confidence-Gated Fixes** | Findings below confidence threshold are never auto-fixed |
-| **MCP Tool Architecture** | Agents interact with GitHub, filesystem, test runners, and DevOps tools via isolated MCP servers |
-| **Static Analysis Integration** | Security Agent runs Bandit, Semgrep, and Trivy — LLM interprets results in context |
-| **AI Evaluation Framework** | LLM-as-a-Judge + deterministic metrics validate every agent finding |
-| **CI/CD Quality Gate** | GitHub Actions blocks deployment if agent quality degrades |
-| **Self-Improvement Loop** | Failed evaluation triggers automated prompt optimisation and benchmarking |
-| **Real-Time Dashboard** | Live audit progress, health scores, finding history, agent performance |
-| **Continuous Monitoring (V5)** | GitHub webhook re-audits on every commit and notifies of new issues |
+| **Single-Call Unified Audit** | One LLM call analyzes all 7 dimensions (security, code quality, architecture, performance, testing, DevOps, documentation) together — 2 LLM calls per audit total |
+| **Confidence-Gated Findings** | Rule-based confidence pipeline validates evidence and gates which findings can be auto-fixed |
+| **MCP Tool Architecture** | `github_mcp` fetches repository data over the MCP stdio protocol; `filesystem_mcp`, `test_mcp`, and `devops_mcp` exist and run but are not yet wired into the pipeline |
+| **AI Evaluation Framework** | Deterministic agent/finding/system metrics plus one LLM-as-a-judge call score every completed audit (16 evaluation rows typical) |
+| **CI/CD Quality Gate** | `check_threshold.py` reads recent evaluation scores from Postgres and fails the build if quality drops |
+| **Self-Improvement Loop** | If `agent_success_rate` over the last 5 audits drops below 0.80, an improved prompt is drafted and benchmarked for the worst-performing agent role |
+| **Continuous Monitoring** | GitHub push webhook re-audits the repo and logs new/resolved findings via `notifier.py` |
+| **Dashboard** | Next.js app showing audits, findings, and evaluation history |
 
 ---
 
@@ -178,14 +176,14 @@ This is AI evaluation as a core product feature, not a checkbox.
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js, TypeScript, Tailwind CSS, Shadcn UI |
-| Backend | FastAPI, PostgreSQL, Redis |
-| Agents | Microsoft AutoGen, Python MCP SDK |
-| Static Analysis | Bandit, Semgrep, Trivy, Flake8 |
-| Evaluation | Custom framework, LLM-as-a-Judge, RAGAS |
-| Observability | OpenTelemetry, Langfuse |
+| Frontend | Next.js, TypeScript, Tailwind CSS |
+| Backend | FastAPI, PostgreSQL, Redis (standby), SQLAlchemy (async), Alembic |
+| LLM | OpenRouter (or any OpenAI-compatible endpoint via `OPENAI_BASE_URL`), model set via `AUTOGEN_MODEL` |
+| Agents | Plain async Python — no agent framework; MCP stdio client for `github_mcp` |
+| MCP | Python MCP SDK — `github_mcp` active, `filesystem_mcp` / `test_mcp` / `devops_mcp` standby |
+| Evaluation | Custom framework — deterministic metrics + a single LLM-as-a-judge call |
 | Infrastructure | Docker, Docker Compose, GitHub Actions |
-| Deployment | AWS / GCP |
+| Deployment | Local Docker only — no cloud deployment yet |
 
 ---
 
@@ -193,19 +191,20 @@ This is AI evaluation as a core product feature, not a checkbox.
 
 ```
 agentops/
-├── frontend/                 # Next.js dashboard
-├── backend/                  # FastAPI orchestrator, DB models, API routes
-├── agents/                   # AutoGen agent configs and workflows
-│   ├── prompts/              # System messages per agent role
-│   └── tools/                # MCP client connectors
-├── mcp_servers/              # Isolated MCP tool servers
-│   ├── github_mcp/           # Clone, read, branch, commit, PR
-│   ├── filesystem_mcp/       # Secure sandbox file operations
-│   ├── test_mcp/             # Pytest, coverage, Bandit, Semgrep, Trivy
-│   └── devops_mcp/           # Docker inspection, CI/CD pipeline checks
-├── evaluation/               # Evaluation framework and benchmark datasets
-├── infrastructure/           # Dockerfiles
-├── .github/workflows/        # CI/CD pipelines and quality gates
+├── frontend/                 # Next.js dashboard (src/app, src/components)
+├── backend/                  # FastAPI app, DB models, API routes, services
+│   ├── api/                  # audits, findings, evaluations, fixes, webhooks
+│   ├── models/                # SQLAlchemy models
+│   ├── services/               # dispatcher, evaluator, notifier, prompt_optimizer
+│   └── tests/                 # API + manager unit tests
+├── agents/                   # repo_analyzer, unified_agent, manager, developer,
+│                              # individual specialist agents (currently unused),
+│                              # prompts/, tools/ (MCP client connectors)
+├── mcp_servers/               # github_mcp (active), filesystem_mcp/test_mcp/devops_mcp (standby)
+├── evaluation/                 # framework.py, confidence_pipeline.py, metrics/, benchmarks/, tests/
+├── infrastructure/            # Dockerfiles for backend, frontend, and each MCP server
+├── .github/workflows/          # ci.yml, eval_gate.yml
+├── check_threshold.py         # CI quality-gate script
 └── docker-compose.yml
 ```
 
@@ -217,12 +216,12 @@ For a detailed breakdown of every folder, see [ARCHITECTURE.md](./ARCHITECTURE.m
 
 | File | What It Covers |
 |---|---|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Folder structure, data flow, MCP design, DB schema, confidence system |
-| [AGENTS.md](./AGENTS.md) | Each agent's role, tools, inputs, outputs, and prompt strategy |
-| [EVALUATION.md](./EVALUATION.md) | Full evaluation framework: metrics, LLM-as-a-Judge, quality gate, self-improvement |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Folder structure, data flow, MCP server status, DB schema |
+| [AGENTS.md](./AGENTS.md) | What each agent module actually does today |
+| [EVALUATION.md](./EVALUATION.md) | Confidence pipeline, evaluation framework, quality gate, self-improvement loop |
 | [SETUP.md](./SETUP.md) | Local dev setup, environment variables, Docker, running the stack |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | How to add new agents, MCP tools, or evaluation metrics |
-| [ROADMAP.md](./ROADMAP.md) | 5-version implementation plan with weekly milestones |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | How to add MCP tools, evaluation metrics, and switch between unified/specialist agent modes |
+| [ROADMAP.md](./ROADMAP.md) | What's built (V1–V5) and what's planned next |
 
 ---
 
@@ -235,7 +234,7 @@ cd agentops
 
 # Copy environment variables
 cp .env.example .env
-# Fill in your API keys (see SETUP.md)
+# Fill in POSTGRES_PASSWORD, OPENAI_API_KEY, GITHUB_TOKEN, SECRET_KEY (see SETUP.md)
 
 # Start the full stack
 docker compose up --build
@@ -248,16 +247,27 @@ Full setup instructions: [SETUP.md](./SETUP.md)
 
 ---
 
+## What's Not Built Yet
+
+Being upfront about the gaps:
+
+- **Auto-fix end-to-end** — `POST /api/fixes/{finding_id}/approve` validates and queues a background task, but that task only logs; it does not yet write a fix, run tests via `test_mcp`, or open a PR. This is the next big milestone.
+- **Audit timeline / observability tracing** — no per-step tracing UI yet.
+- **`filesystem_mcp`, `test_mcp`, `devops_mcp` in the audit pipeline** — all three are built, containerized, and running, but only `github_mcp` is actually called during an audit today.
+- **Token/cost tracking** — `AgentRun.tokens_used` and `cost_usd` columns exist but are always `0`; the OpenRouter/OpenAI call sites don't record usage yet.
+- **Cloud deployment** — local Docker Compose only.
+
+---
+
 ## Why This Project Exists
 
 Built to demonstrate production-grade skills across:
 
-- Multi-agent AI systems (AutoGen)
+- LLM-powered analysis pipelines and prompt design
 - MCP server design and implementation
 - AI evaluation, confidence scoring, and LLMOps
-- CI/CD pipeline engineering with AI quality gates
-- Static analysis tool integration
+- CI/CD pipeline engineering with a real quality gate reading from a live database
 - Full-stack development
-- Docker and cloud deployment
+- Docker-based infrastructure
 
 This project targets roles in **LLMOps**, **AI Engineering**, and **Full-Stack AI** development.

@@ -1,104 +1,59 @@
 # Contributing — AgentOps
 
-This guide explains how to extend AgentOps: adding new specialist agents, new MCP tools, new evaluation metrics, or new benchmark repositories.
+This guide explains how to extend AgentOps: switching between unified and specialist audit modes, adding new MCP tools, and adding new evaluation metrics.
 
 ---
 
-## Adding a New Specialist Agent
+## Switching Between Unified and Specialist Mode
 
-**1. Create the agent file**
-
-```python
-# agents/your_agent.py
-
-from autogen import AssistantAgent
-from agents.tools.github_client import github_tools
-from agents.tools.your_mcp_client import your_tools   # if needed
-
-def create_your_agent(llm_config: dict) -> AssistantAgent:
-    return AssistantAgent(
-        name="your_agent",
-        system_message=open("agents/prompts/your_agent.txt").read(),
-        llm_config={
-            **llm_config,
-            "tools": github_tools + your_tools,
-        }
-    )
-```
-
-**2. Write the system prompt**
-
-```
-# agents/prompts/your_agent.txt
-
-You are the [Role] Agent in the AgentOps codebase audit team.
-
-Your sole responsibility is: [one clear sentence about what category of issues you find]
-
-You have access to the following tools:
-- github_mcp.read_file: read source files to find evidence
-- github_mcp.search_code: search patterns across the codebase
-
-You must NOT:
-- Report issues you cannot find direct evidence for in the code
-- Call tools outside your permitted set
-- Modify any files (read only)
-- Report the same issue more than once
-
-For every finding you produce, you MUST include:
-- The exact file path and line number (if applicable)
-- A quote or description of the specific code that is the problem
-- Why this matters (impact on the user/system)
-- How to fix it
-
-Output each finding as JSON:
-{
-  "category": "your_category",
-  "severity": "critical|high|medium|low",
-  "title": "Short, specific title",
-  "detail": "Full explanation with evidence, impact, and fix",
-  "file_path": "path/to/file.py or null",
-  "line_number": 42 or null,
-  "confidence": 0.0-1.0,
-  "auto_fix_available": true or false
-}
-```
-
-**3. Register the agent in the team**
+Today, `backend/services/dispatcher.py` calls exactly one agent module for the audit itself:
 
 ```python
-# agents/team.py
+# backend/services/dispatcher.py
 
-from agents.your_agent import create_your_agent
+from agents.manager import synthesise_findings
+from agents.repo_analyzer import analyze_repository
+from agents.unified_agent import run_unified_audit
+...
 
-your_agent = create_your_agent(llm_config)
+repo_map = await analyze_repository(audit_job.repo_url)
+all_findings = await run_unified_audit(repo_map)          # 1 LLM call, all 7 dimensions
+validated_findings = await validate_findings(all_findings, repo_map)
+result = await synthesise_findings(validated_findings, repo_map)
+```
 
-groupchat = GroupChat(
-    agents=[
-        manager, repo_analyzer,
-        code_quality, security, architecture,
-        performance, testing, devops, documentation,
-        your_agent,   # add here
-        developer
-    ],
-    ...
+This is "unified mode" — 1 LLM call per audit, cheap and fast, but each dimension gets shallower attention than a dedicated specialist would give it.
+
+The individual specialist agents (`agents/security.py`, `code_quality.py`, `architecture.py`, `performance.py`, `testing.py`, `devops.py`, `documentation.py`) already exist and work in isolation — each exposes a `run_*_audit(repo_map)` function using the same `call_llm_for_findings` helper as `unified_agent.py`. To re-enable "specialist mode" (7 LLM calls per audit instead of 1):
+
+```python
+# backend/services/dispatcher.py — specialist mode
+
+import asyncio
+from agents.security import run_security_audit
+from agents.code_quality import run_code_quality_audit
+from agents.architecture import run_architecture_audit
+from agents.performance import run_performance_audit
+from agents.testing import run_testing_audit
+from agents.devops import run_devops_audit
+from agents.documentation import run_documentation_audit
+
+repo_map = await analyze_repository(audit_job.repo_url)
+
+results = await asyncio.gather(
+    run_security_audit(repo_map),
+    run_code_quality_audit(repo_map),
+    run_architecture_audit(repo_map),
+    run_performance_audit(repo_map),
+    run_testing_audit(repo_map),
+    run_devops_audit(repo_map),
+    run_documentation_audit(repo_map),
+    return_exceptions=True,
 )
+all_findings = [f for r in results if isinstance(r, list) for f in r]
 ```
 
-**4. Add to the Manager's audit plan**
-
-```python
-# agents/prompts/manager.txt
-# Add your agent to the audit_sequence and parallel_groups
-```
-
-**5. Define MCP access permissions**
-
-Update the permissions table in `ARCHITECTURE.md`. Your system prompt must explicitly list what tools the agent may and may not call.
-
-**6. Add to benchmark evaluation**
-
-Add findings from your agent's category to at least one benchmark repository in `evaluation/benchmarks/dataset.json`.
+You'd want a matching `AgentRun` row per specialist call instead of the single `unified` row, mirroring what the dispatcher currently does around the `unified_agent` call. This is a real trade-off — before switching, check current evaluation scores in the `evaluations` table (`agent_success_rate`, `average_confidence`) so you have a baseline to compare against after the change.
 
 ---
 
@@ -149,85 +104,44 @@ from mcp_servers.your_mcp.tools.your_tool import register_your_tool
 register_your_tool(server)
 ```
 
-**3. Add the MCP client connector**
+**3. Add or extend the MCP client connector**
 
-```python
-# agents/tools/your_mcp_client.py
+Follow the pattern in `agents/tools/github_client.py`: open one `stdio_client` session per logical unit of work (e.g. per repo analysis) rather than spawning a fresh subprocess per tool call, and expose thin async wrapper functions that call `session.call_tool(...)` and parse the JSON result.
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+**4. Test the tool directly before connecting it to any agent**
 
-async def call_your_tool(param_one: str) -> str:
-    server_params = StdioServerParameters(
-        command="python",
-        args=["mcp_servers/your_mcp/server.py"]
-    )
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool("your_tool_name", {"param_one": param_one})
-            return result.content[0].text
-```
-
-**4. Test the tool directly before connecting to any agent**
-
-```bash
-curl -X POST http://localhost:{your_mcp_port}/tools/your_tool_name \
-  -H "Content-Type: application/json" \
-  -d '{"param_one": "test_value"}'
-```
-
-Never connect a new tool to an agent before verifying it works in isolation.
+Each MCP server exposes an HTTP `/health` check via Docker Compose, but the tools themselves are called over MCP stdio, not HTTP. Write a small standalone script that opens a session and calls the tool directly, and confirm the output shape before wiring it into an agent module.
 
 ---
 
 ## Adding a New Evaluation Metric
 
 **1. Choose the metric category:**
-- **Finding-level** (validates individual findings): add to `evaluation/confidence_pipeline.py`
-- **Agent-level deterministic** (computed from DB logs): add to `evaluation/metrics/agent_metrics.py`
-- **LLM-as-a-Judge** (requires LLM scoring): add to `evaluation/metrics/llm_judge.py`
-- **System-level** (latency, cost): add to `evaluation/metrics/system_metrics.py`
+- **Finding-level rule** (validates individual findings before they're persisted): add to `evaluation/confidence_pipeline.py`
+- **Agent-level deterministic** (computed from `agent_runs`): add to `evaluation/metrics/agent_metrics.py`
+- **Finding-level deterministic** (computed from `findings`): add to `evaluation/metrics/finding_metrics.py`
+- **System-level deterministic** (computed from `audit_jobs`): add to `evaluation/metrics/system_metrics.py`
+- **LLM-as-a-Judge** (requires an LLM call): add to `evaluation/metrics/llm_judge.py` — be mindful this is the second and last LLM call in the whole pipeline; don't add a second judge call without good reason
 
 **2. Implement the metric**
 
-```python
-# evaluation/metrics/your_category.py
-
-def compute_your_metric(audit_data: dict) -> dict:
-    """
-    Computes [metric name].
-
-    Args:
-        audit_data: Dict containing relevant AuditJob, AgentRun,
-                    Finding, or ToolExecution data
-
-    Returns:
-        Dict with keys: metric (str), score (float), feedback (str or None)
-    """
-    score = your_calculation(audit_data)
-
-    return {
-        "metric": "your_metric_name",
-        "score": score,        # float, normalised 0.0–1.0 or raw value
-        "feedback": None       # str explanation or None
-    }
-```
-
-**3. Register in the evaluation framework**
+Each metric function returns a list of dicts shaped like:
 
 ```python
-# evaluation/framework.py
-
-from evaluation.metrics.your_category import compute_your_metric
-
-def run_evaluation(audit_id: str) -> list[dict]:
-    ...
-    metrics.append(compute_your_metric(audit_data))
-    ...
+{
+    "metric": "your_metric_name",
+    "score": 0.0,          # float
+    "feedback": None,      # str explanation or None
+}
 ```
 
-**4. (Optional) Add to quality gate**
+Follow the existing pattern in `evaluation/metrics/*.py`: wrap the whole function body in a try/except that logs and returns `[]` on failure, since `evaluation/framework.py::run_evaluation` must never let a single metric group's failure block the others.
+
+**3. It's picked up automatically**
+
+`evaluation/framework.py::run_evaluation` already calls all four metric groups via `asyncio.gather` and persists whatever they return as `Evaluation` rows. If you add a function to an existing metrics module, no further registration is needed. If you add a new metrics *module*, import and call it from `run_evaluation` alongside the existing four.
+
+**4. (Optional) Add to the quality gate**
 
 ```python
 # check_threshold.py
@@ -240,13 +154,13 @@ QUALITY_GATE_RULES = {
 
 ---
 
-## Adding a Benchmark Repository
+## Adding a Benchmark Case
 
-The benchmark dataset lives at `evaluation/benchmarks/dataset.json`. Each entry points to a repository with known, documented issues that agents should find.
+`evaluation/benchmarks/dataset.json` is currently empty (`"cases": []`). Each case should point to a repository with known, documented issues:
 
 ```json
 {
-  "id": "bench_NNN",
+  "id": "bench_001",
   "repo_url": "https://github.com/agentops-benchmarks/your-repo",
   "description": "Brief description of what issues are planted",
   "known_findings": [
@@ -255,29 +169,22 @@ The benchmark dataset lives at `evaluation/benchmarks/dataset.json`. Each entry 
       "title": "Short title matching what the agent should report",
       "file_path": "path/to/file.py",
       "line_number": 42,
-      "severity": "critical|high|medium|low"
+      "severity": "critical"
     }
   ]
 }
 ```
 
-**Rules for good benchmark repos:**
-- Issues must be definitively present — no ambiguous "might be a problem" findings
-- Cover at least 3 different categories per repo
-- Include at least one issue per severity level
-- The repo must be publicly accessible (or accessible with the configured GITHUB_TOKEN)
-- Known findings must be specific enough that agent output can be matched against them
+`evaluation/seed_benchmarks.py` loads this file into the database. There is currently no automated scoring pipeline that runs the audit against these cases and compares output — that would be a good next contribution alongside populating real cases.
 
 ---
 
 ## Code Standards
 
-- All Python code must pass `flake8` and `black` before committing
-- All new MCP tools must have a corresponding manual cURL test documented in the PR
-- All new evaluation metrics must have a unit test in `evaluation/tests/`
-- System prompts must explicitly state what the agent **cannot** do, not just what it can
-- Every finding an agent produces must include file_path, evidence, impact, and a fix recommendation
-- Never connect a new tool to an agent before testing it in isolation first
+- All Python code must pass `flake8` and `black` before committing (enforced in `.github/workflows/ci.yml`)
+- Every finding a metric or agent produces should include enough context (title, detail, evidence) to be independently checkable
+- Metric and pipeline functions must not raise — they should log and return an empty result on failure, matching the existing pattern throughout `evaluation/`
+- Test new MCP tools in isolation before wiring them into any agent module
 
 ---
 
@@ -290,12 +197,8 @@ cd backend && pytest
 # Evaluation framework tests
 cd evaluation && pytest tests/
 
-# MCP server tests
-cd mcp_servers/github_mcp && pytest
-cd mcp_servers/filesystem_mcp && pytest
-cd mcp_servers/test_mcp && pytest
-cd mcp_servers/devops_mcp && pytest
-
-# Full benchmark run
-docker compose exec backend python -m evaluation.framework --benchmark
+# All tests from repo root
+pytest backend/tests evaluation/tests
 ```
+
+11 tests currently pass across both suites.

@@ -2,6 +2,7 @@
 
 from backend.models.agent_run import AgentRun, AgentRunStatus
 from backend.models.audit_job import AuditJob, AuditJobStatus
+from backend.models.audit_span import AuditSpan
 from backend.models.evaluation import Evaluation
 from backend.models.finding import (
     Finding,
@@ -17,6 +18,7 @@ __all__ = [
     "AgentRunStatus",
     "AuditJob",
     "AuditJobStatus",
+    "AuditSpan",
     "Evaluation",
     "Finding",
     "FindingCategory",

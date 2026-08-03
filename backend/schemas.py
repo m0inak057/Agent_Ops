@@ -120,3 +120,30 @@ class FixApproveResponse(BaseModel):
     finding_id: uuid.UUID
     fix_status: FindingFixStatus
     message: str
+
+
+class AuditSpanResponse(BaseModel):
+    """Full representation of a single timed span within an audit's timeline."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    span_name: str
+    status: str
+    started_at: str
+    ended_at: str | None
+    duration_ms: float | None
+    input_summary: str | None
+    output_summary: str | None
+    error: str | None
+    metadata: dict | None
+
+
+class AuditTimelineResponse(BaseModel):
+    """Full observability timeline for a single audit."""
+
+    audit_id: str
+    repo_name: str | None
+    status: AuditJobStatus
+    total_duration_ms: float
+    spans: list[AuditSpanResponse]

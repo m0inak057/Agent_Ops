@@ -17,6 +17,7 @@ from backend.db import Base
 
 if TYPE_CHECKING:
     from backend.models.agent_run import AgentRun
+    from backend.models.audit_span import AuditSpan
     from backend.models.evaluation import Evaluation
     from backend.models.finding import Finding
 
@@ -59,6 +60,9 @@ class AuditJob(Base):
     )
     evaluations: Mapped[list["Evaluation"]] = relationship(
         "Evaluation", back_populates="audit_job", cascade="all, delete-orphan"
+    )
+    audit_spans: Mapped[list["AuditSpan"]] = relationship(
+        "AuditSpan", back_populates="audit_job", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:

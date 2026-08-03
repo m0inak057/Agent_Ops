@@ -16,9 +16,11 @@ from backend.schemas import (
     AuditJobCreate,
     AuditJobCreateResponse,
     AuditJobResponse,
+    AuditTimelineResponse,
     extract_repo_name,
 )
 from backend.services.dispatcher import dispatch_audit
+from backend.services.tracer import get_audit_timeline
 
 router = APIRouter(prefix="/audits", tags=["audits"])
 
@@ -83,3 +85,27 @@ async def list_audits(
 
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+@router.get("/{audit_id}/timeline", response_model=AuditTimelineResponse)
+async def get_audit_timeline_endpoint(
+    audit_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> AuditTimelineResponse:
+    """Return the full observability timeline for an audit."""
+    audit_job = await db.get(AuditJob, audit_id)
+    if audit_job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Audit job not found"
+        )
+
+    timeline = await get_audit_timeline(audit_id, db)
+    total_duration_ms = sum(span["duration_ms"] or 0 for span in timeline)
+
+    return AuditTimelineResponse(
+        audit_id=str(audit_id),
+        repo_name=audit_job.repo_name,
+        status=audit_job.status,
+        total_duration_ms=total_duration_ms,
+        spans=timeline,
+    )

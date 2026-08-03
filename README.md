@@ -65,7 +65,7 @@ flowchart TD
     Y --> Z[👤 Health Score + Findings + Timeline]
 ```
 
-Two LLM calls total per audit: the unified audit call and the evaluation quality-judge call. Health score is computed deterministically from severity counts (see [ARCHITECTURE.md](./ARCHITECTURE.md)) — it is not an LLM output.
+Two LLM calls total per audit: the unified audit call and the evaluation quality-judge call. Health score is computed deterministically from severity counts (see [ARCHITECTURE.md](./docs/ARCHITECTURE.md)) — it is not an LLM output.
 
 ## MCP Server Architecture
 
@@ -177,7 +177,7 @@ Overall:          71 / 100
   8. API endpoints undocumented
 ```
 
-Health score is computed deterministically from severity counts (see [ARCHITECTURE.md](./ARCHITECTURE.md)) — it is not an LLM output.
+Health score is computed deterministically from severity counts (see [ARCHITECTURE.md](./docs/ARCHITECTURE.md)) — it is not an LLM output.
 
 **Step 4 — Auto-fix (endpoint exists, execution not yet wired)**
 
@@ -249,7 +249,7 @@ agentops/
 └── docker-compose.yml
 ```
 
-For a detailed breakdown of every folder, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+For a detailed breakdown of every folder, see [ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 
 ---
 
@@ -257,12 +257,12 @@ For a detailed breakdown of every folder, see [ARCHITECTURE.md](./ARCHITECTURE.m
 
 | File | What It Covers |
 |---|---|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Folder structure, data flow, MCP server status, DB schema |
-| [AGENTS.md](./AGENTS.md) | What each agent module actually does today |
-| [EVALUATION.md](./EVALUATION.md) | Confidence pipeline, evaluation framework, quality gate, self-improvement loop |
-| [SETUP.md](./SETUP.md) | Local dev setup, environment variables, Docker, running the stack |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | How to add MCP tools, evaluation metrics, and switch between unified/specialist agent modes |
-| [ROADMAP.md](./ROADMAP.md) | What's built (V1–V5) and what's planned next |
+| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Folder structure, data flow, MCP server status, DB schema |
+| [AGENTS.md](./docs/AGENTS.md) | What each agent module actually does today |
+| [EVALUATION.md](./docs/EVALUATION.md) | Confidence pipeline, evaluation framework, quality gate, self-improvement loop |
+| [SETUP.md](./docs/SETUP.md) | Local dev setup, environment variables, Docker, running the stack |
+| [CONTRIBUTING.md](./docs/CONTRIBUTING.md) | How to add MCP tools, evaluation metrics, and switch between unified/specialist agent modes |
+| [ROADMAP.md](./docs/ROADMAP.md) | What's built (V1–V5) and what's planned next |
 
 ---
 
@@ -311,7 +311,7 @@ docker compose up --build
 open http://localhost:3000
 ```
 
-Full setup instructions: [SETUP.md](./SETUP.md)
+Full setup instructions: [SETUP.md](./docs/SETUP.md)
 
 ---
 

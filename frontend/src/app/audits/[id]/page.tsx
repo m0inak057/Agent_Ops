@@ -9,8 +9,17 @@ import FindingCard from "@/components/FindingCard";
 import LiveAuditProgress from "@/components/LiveAuditProgress";
 import SeverityBadge from "@/components/SeverityBadge";
 import StatusBadge from "@/components/StatusBadge";
-import { getAudit, listFindings, findingsSummary, MOCK_FINDINGS } from "@/lib/api";
-import { AuditJob, Finding, FindingCategory, FindingSeverity, FindingSummary } from "@/types";
+import AuditTimeline from "@/components/AuditTimeline";
+import {
+  getAudit,
+  listFindings,
+  findingsSummary,
+  listEvaluations,
+  getAuditTimeline,
+  MOCK_FINDINGS,
+  AuditTimeline as AuditTimelineType,
+} from "@/lib/api";
+import { AuditJob, Evaluation, Finding, FindingCategory, FindingSeverity, FindingSummary } from "@/types";
 import { CATEGORY_LABELS, CATEGORY_ICONS, timeAgo } from "@/lib/utils";
 import { ArrowLeft, GitFork, Clock, AlertTriangle } from "lucide-react";
 import Link from "next/link";
@@ -38,6 +47,9 @@ export default function AuditDetailPage() {
   const [audit, setAudit] = useState<AuditJob | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [summary, setSummary] = useState<FindingSummary | null>(null);
+  const [evaluations, setEvaluations] = useState<Evaluation[]>([]);
+  const [timeline, setTimeline] = useState<AuditTimelineType | null>(null);
+  const [activeTab, setActiveTab] = useState<"findings" | "timeline" | "evaluations">("findings");
   const [loading, setLoading] = useState(true);
   const [severityFilter, setSeverityFilter] = useState<FindingSeverity | "all">("all");
   const [categoryFilter, setCategoryFilter] = useState<FindingCategory | "all">("all");
@@ -56,7 +68,20 @@ export default function AuditDetailPage() {
         ]);
         setFindings(findingsData);
         setSummary(summaryData);
+
+        try {
+          setEvaluations(await listEvaluations(id));
+        } catch {
+          // Evaluations not available
+        }
       }
+
+      try {
+        setTimeline(await getAuditTimeline(id));
+      } catch {
+        // Timeline not available yet — audit may still be running
+      }
+
       setUseMock(false);
     } catch {
       // Use mock data for the first MOCK_AUDIT
@@ -236,59 +261,122 @@ export default function AuditDetailPage() {
               )}
             </div>
 
-            {/* Findings list */}
-            <div
-              className="animate-fade-in-up"
-              style={{ animationDelay: "240ms", animationFillMode: "both" }}
-            >
-              <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-                <h2 className="text-base font-bold text-slate-200">
-                  Findings ({filteredFindings.length})
-                </h2>
-                <div className="flex items-center gap-2 flex-wrap">
-                  {/* Severity filter */}
-                  <div className="flex gap-1 p-1 glass rounded-lg">
-                    {SEVERITY_FILTERS.map(({ value, label }) => (
-                      <button
-                        key={value}
-                        onClick={() => setSeverityFilter(value)}
-                        className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all duration-150 ${
-                          severityFilter === value
-                            ? "bg-indigo-600/25 text-indigo-300"
-                            : "text-slate-500 hover:text-slate-300"
-                        }`}
-                      >
-                        {label}
-                      </button>
+            {/* Tab navigation */}
+            <div className="flex gap-1 border-b border-white/10 mb-6">
+              {(["findings", "timeline", "evaluations"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`px-4 py-2 text-sm font-medium capitalize transition-colors ${
+                    activeTab === tab
+                      ? "text-indigo-400 border-b-2 border-indigo-400"
+                      : "text-slate-500 hover:text-slate-300"
+                  }`}
+                >
+                  {tab === "timeline"
+                    ? "Pipeline Timeline"
+                    : tab === "evaluations"
+                    ? "Evaluation Metrics"
+                    : "Findings"}
+                </button>
+              ))}
+            </div>
+
+            {activeTab === "findings" && (
+              <div
+                className="animate-fade-in-up"
+                style={{ animationDelay: "240ms", animationFillMode: "both" }}
+              >
+                <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+                  <h2 className="text-base font-bold text-slate-200">
+                    Findings ({filteredFindings.length})
+                  </h2>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {/* Severity filter */}
+                    <div className="flex gap-1 p-1 glass rounded-lg">
+                      {SEVERITY_FILTERS.map(({ value, label }) => (
+                        <button
+                          key={value}
+                          onClick={() => setSeverityFilter(value)}
+                          className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all duration-150 ${
+                            severityFilter === value
+                              ? "bg-indigo-600/25 text-indigo-300"
+                              : "text-slate-500 hover:text-slate-300"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    {/* Category filter */}
+                    <select
+                      value={categoryFilter}
+                      onChange={(e) => setCategoryFilter(e.target.value as FindingCategory | "all")}
+                      className="px-2.5 py-1.5 rounded-lg glass text-xs text-slate-400 border border-white/10 bg-transparent outline-none"
+                    >
+                      {CATEGORY_FILTERS.map(({ value, label }) => (
+                        <option key={value} value={value} className="bg-[#0e0e1a]">
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {filteredFindings.length === 0 ? (
+                  <div className="glass rounded-xl p-12 text-center">
+                    <p className="text-slate-400 text-sm">No findings match the current filter.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {filteredFindings.map((finding, i) => (
+                      <FindingCard key={finding.id} finding={finding} index={i} />
                     ))}
                   </div>
-                  {/* Category filter */}
-                  <select
-                    value={categoryFilter}
-                    onChange={(e) => setCategoryFilter(e.target.value as FindingCategory | "all")}
-                    className="px-2.5 py-1.5 rounded-lg glass text-xs text-slate-400 border border-white/10 bg-transparent outline-none"
-                  >
-                    {CATEGORY_FILTERS.map(({ value, label }) => (
-                      <option key={value} value={value} className="bg-[#0e0e1a]">
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                )}
               </div>
+            )}
 
-              {filteredFindings.length === 0 ? (
-                <div className="glass rounded-xl p-12 text-center">
-                  <p className="text-slate-400 text-sm">No findings match the current filter.</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {filteredFindings.map((finding, i) => (
-                    <FindingCard key={finding.id} finding={finding} index={i} />
-                  ))}
-                </div>
-              )}
-            </div>
+            {activeTab === "timeline" && (
+              <div className="animate-fade-in-up space-y-4">
+                {timeline ? (
+                  <AuditTimeline
+                    spans={timeline.spans}
+                    totalDurationMs={timeline.total_duration_ms}
+                  />
+                ) : (
+                  <div className="glass rounded-xl p-12 text-center">
+                    <p className="text-slate-400 text-sm">Timeline not available yet.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === "evaluations" && (
+              <div className="animate-fade-in-up">
+                {evaluations.length === 0 ? (
+                  <div className="glass rounded-xl p-12 text-center">
+                    <p className="text-slate-400 text-sm">No evaluation metrics available yet.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {evaluations.map((evalItem) => (
+                      <div key={evalItem.id} className="glass rounded-xl p-4">
+                        <p className="text-xs text-slate-500 uppercase tracking-wider mb-1">
+                          {evalItem.metric.replace(/_/g, " ")}
+                        </p>
+                        <p className="text-2xl font-bold text-slate-100">
+                          {(evalItem.score * 100).toFixed(1)}%
+                        </p>
+                        {evalItem.feedback && (
+                          <p className="text-xs text-slate-500 mt-2">{evalItem.feedback}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
       </div>

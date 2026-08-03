@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Navbar from "@/components/Navbar";
 import AuditCard from "@/components/AuditCard";
+import HealthTrendChart from "@/components/HealthTrendChart";
 import { listAudits } from "@/lib/api";
 import { MOCK_AUDITS } from "@/lib/api";
 import { AuditJob, AuditStatus } from "@/types";
@@ -137,6 +138,39 @@ export default function DashboardPage() {
             ))}
           </div>
         )}
+
+        {/* Health Score Trends */}
+        {(() => {
+          const repoGroups = audits.reduce((acc, audit) => {
+            const key = audit.repo_name ?? audit.repo_url;
+            if (!acc[key]) acc[key] = [];
+            acc[key].push(audit);
+            return acc;
+          }, {} as Record<string, typeof audits>);
+
+          const reposWithTrends = Object.entries(repoGroups).filter(
+            ([, repoAudits]) =>
+              repoAudits.filter((a) => a.status === "complete").length >= 2
+          );
+
+          if (reposWithTrends.length === 0) return null;
+
+          return (
+            <div className="mt-8">
+              <h2 className="text-xl font-semibold text-slate-100 mb-4">
+                Health Score Trends
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {reposWithTrends.map(([repoName, repoAudits]) => (
+                  <div key={repoName} className="glass rounded-xl p-4">
+                    <p className="text-sm text-slate-400 mb-3 truncate">{repoName}</p>
+                    <HealthTrendChart audits={repoAudits} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

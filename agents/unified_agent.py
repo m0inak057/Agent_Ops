@@ -19,6 +19,10 @@ information across ALL of these 7 dimensions simultaneously:
 6. devops - Docker security, missing CI/CD, secrets management
 7. documentation - README quality, missing setup instructions
 
+Note: For DevOps findings, structural tool analysis results are
+provided in the context. Use them as concrete evidence for your
+findings rather than inferring from file names alone.
+
 Return ONLY a JSON array of findings. No other text.
 Each finding must have exactly these fields:
 - category: one of the 7 dimensions above
@@ -33,6 +37,21 @@ Each finding must have exactly these fields:
 Be specific and evidence-based. Only report issues you can
 infer from the provided repository information.
 Return 5-15 findings maximum. Quality over quantity."""
+
+
+def format_devops_findings(findings: list) -> str:
+    """Format devops_mcp findings for LLM context."""
+    if not findings:
+        return "No structural issues detected by DevOps tools"
+
+    lines = []
+    for f in findings:
+        if isinstance(f, dict):
+            severity = f.get("severity", "info").upper()
+            message = f.get("message") or f.get("detail") or f.get("finding") or str(f)
+            lines.append(f"  [{severity}] {message}")
+
+    return "\n".join(lines) if lines else "No issues found"
 
 
 async def run_unified_audit(repo_map: dict) -> list[dict]:
@@ -62,7 +81,10 @@ README (first 2000 chars):
 {str(repo_map.get('readme_content', 'Not found'))[:2000]}
 
 CI/CD Config:
-{str(repo_map.get('ci_cd_content', 'Not found'))[:1000]}"""
+{str(repo_map.get('ci_cd_content', 'Not found'))[:1000]}
+
+DevOps Tool Analysis (from structural inspection):
+{format_devops_findings(repo_map.get('devops_tool_findings', []))}"""
 
     findings = await call_llm_for_findings(
         system_prompt=SYSTEM_PROMPT,

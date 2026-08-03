@@ -7,16 +7,38 @@ rest of the audit team.
 
 import re
 
+from agents.tools.devops_client import (
+    devops_mcp_session,
+    inspect_ci_pipeline,
+    inspect_dockerfile,
+)
 from agents.tools.github_client import (
     get_file_content,
     get_repository,
     get_repository_tree,
     github_mcp_session,
 )
+from agents.tools.test_client import test_mcp_session
 
 DEPENDENCY_CANDIDATES = ["requirements.txt", "package.json"]
-DOCKERFILE_CANDIDATES = ["Dockerfile"]
-COMPOSE_CANDIDATES = ["docker-compose.yml"]
+
+# Checked in order first; if none of these exact paths exist, we fall back
+# to scanning the whole tree for any file whose name starts with the
+# relevant prefix (see _find_matching_path), so Dockerfiles/compose files
+# tucked away in project-specific subdirectories are still found.
+DOCKERFILE_PATTERNS = [
+    "Dockerfile",
+    "infrastructure/Dockerfile.backend",
+    "infrastructure/Dockerfile",
+    "docker/Dockerfile",
+    "deploy/Dockerfile",
+]
+COMPOSE_PATTERNS = [
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "infrastructure/docker-compose.yml",
+    "deploy/docker-compose.yml",
+]
 README_CANDIDATES = ["README.md"]
 
 LANGUAGE_EXTENSIONS = {
@@ -50,6 +72,27 @@ async def _read_if_exists(repo_name: str, path: str, session) -> str | None:
         return await get_file_content(repo_name, path, session)
     except Exception:
         return None
+
+
+def _find_matching_path(
+    file_tree: list[str], patterns: list[str], prefix: str
+) -> str | None:
+    """Find a file in the tree matching a known pattern, or a name prefix.
+
+    Checks the exact known-location patterns first, then falls back to
+    scanning the whole tree for any file whose name starts with the given
+    prefix, so files in arbitrary subdirectories are still found.
+    """
+    for pattern in patterns:
+        if pattern in file_tree:
+            return pattern
+
+    for path in file_tree:
+        filename = path.split("/")[-1]
+        if filename.startswith(prefix):
+            return path
+
+    return None
 
 
 def _detect_project_type(dependency_content: str | None, languages: list[str]) -> str:
@@ -93,8 +136,13 @@ async def analyze_repository(repo_url: str) -> dict:
                     languages.add(lang)
                     break
 
-        has_dockerfile = any(path in file_tree for path in DOCKERFILE_CANDIDATES)
-        has_docker_compose = any(path in file_tree for path in COMPOSE_CANDIDATES)
+        dockerfile_path = _find_matching_path(
+            file_tree, DOCKERFILE_PATTERNS, "Dockerfile"
+        )
+        compose_path = _find_matching_path(
+            file_tree, COMPOSE_PATTERNS, "docker-compose"
+        )
+        has_docker_compose = compose_path is not None
         has_readme = any(path in file_tree for path in README_CANDIDATES)
         has_tests = any(
             "/tests/" in f"/{path}" or "/test/" in f"/{path}" for path in file_tree
@@ -118,8 +166,11 @@ async def analyze_repository(repo_url: str) -> dict:
                     break
 
         dockerfile_content = None
-        if has_dockerfile:
-            dockerfile_content = await _read_if_exists(repo_name, "Dockerfile", session)
+        if dockerfile_path:
+            dockerfile_content = await _read_if_exists(
+                repo_name, dockerfile_path, session
+            )
+        has_dockerfile = dockerfile_content is not None
 
         readme_content = None
         if has_readme:
@@ -128,6 +179,49 @@ async def analyze_repository(repo_url: str) -> dict:
         ci_cd_content = None
         if workflow_files:
             ci_cd_content = await _read_if_exists(repo_name, workflow_files[0], session)
+
+    # DevOps MCP analysis — structural inspection of Dockerfile/CI config.
+    # A failure to even start the session must not crash the audit, so the
+    # whole block (not just the individual tool calls) is guarded.
+    devops_findings: list[dict] = []
+    try:
+        async with devops_mcp_session() as devops_session:
+            if dockerfile_content:
+                try:
+                    result = await inspect_dockerfile(
+                        dockerfile_content, session=devops_session
+                    )
+                    if isinstance(result, dict):
+                        devops_findings.extend(result.get("findings", []))
+                except Exception as e:
+                    print(f"devops_mcp dockerfile inspection failed: {e}")
+
+            if ci_cd_content:
+                try:
+                    result = await inspect_ci_pipeline(
+                        ci_cd_content, session=devops_session
+                    )
+                    if isinstance(result, dict):
+                        devops_findings.extend(result.get("findings", []))
+                except Exception as e:
+                    print(f"devops_mcp CI inspection failed: {e}")
+    except Exception as e:
+        print(f"devops_mcp session failed to start: {e}")
+        devops_findings = []
+
+    # Test MCP analysis — lint check for Python projects.
+    # Linting requires the repo's files on local disk (via filesystem_mcp),
+    # which isn't available during a remote audit, so we only prove the
+    # test_mcp connection works and note the limitation honestly.
+    lint_output = None
+    if "Python" in languages:
+        try:
+            async with test_mcp_session():
+                lint_output = (
+                    "Linter requires local file access — available in auto-fix mode"
+                )
+        except Exception as e:
+            print(f"test_mcp linter failed: {e}")
 
     project_type = _detect_project_type(dependency_file_content, sorted(languages))
 
@@ -145,4 +239,7 @@ async def analyze_repository(repo_url: str) -> dict:
         "readme_content": readme_content,
         "ci_cd_content": ci_cd_content,
         "file_tree": file_tree,
+        "devops_tool_findings": devops_findings,
+        # List of finding dicts from devops_mcp structural analysis
+        "lint_output": lint_output,
     }

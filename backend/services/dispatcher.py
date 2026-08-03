@@ -67,13 +67,17 @@ async def dispatch_audit(audit_id: uuid.UUID) -> None:
                 repo_map = await analyze_repository(audit_job.repo_url)
                 span.output_summary = (
                     f"{repo_map.get('total_files', 0)} files, "
-                    f"{repo_map.get('project_type', 'unknown')} project"
+                    f"{repo_map.get('project_type', 'unknown')} project, "
+                    f"{len(repo_map.get('devops_tool_findings', []))} devops issues found"
                 )
                 span.metadata_ = {
                     "languages": repo_map.get("languages", []),
                     "has_dockerfile": repo_map.get("has_dockerfile", False),
                     "has_ci_cd": repo_map.get("has_ci_cd", False),
                     "has_tests": repo_map.get("has_tests", False),
+                    "devops_findings_count": len(
+                        repo_map.get("devops_tool_findings", [])
+                    ),
                 }
 
             repo_analyzer_run.status = AgentRunStatus.SUCCESS
